@@ -78,14 +78,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === OPEN_URL_MESSAGE && typeof message.url === 'string' && message.url.length > 0) {
-    chrome.tabs.create({ url: message.url, active: true }, () => {
-      void chrome.runtime.lastError;
-    });
+    if (message.currentTab) {
+      chrome.tabs.update({ url: message.url }, () => {
+        void chrome.runtime.lastError;
+      });
+    } else {
+      chrome.tabs.create({ url: message.url, active: true }, () => {
+        void chrome.runtime.lastError;
+      });
+    }
     return;
   }
 
   if (message?.type === CLOSE_TAB_MESSAGE && typeof message.tabId === 'number') {
     chrome.tabs.remove(message.tabId, () => {
+      void chrome.runtime.lastError;
+    });
+  }
+
+  if (message?.type === 'motion-fss:go-back') {
+    chrome.tabs.goBack(() => {
+      void chrome.runtime.lastError;
+    });
+  }
+
+  if (message?.type === 'motion-fss:go-forward') {
+    chrome.tabs.goForward(() => {
       void chrome.runtime.lastError;
     });
   }
