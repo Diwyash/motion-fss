@@ -605,48 +605,56 @@ onBeforeUnmount(() => {
             </button>
 
             <Transition name="group-expand">
-              <ul v-if="!group.collapsed" class="motion-overlay__group-list">
-                <li
-                  v-for="tab in group.tabs"
-                  :key="tab.id"
-                  class="motion-overlay__group-tab"
-                  @dragover="onGroupItemDragOver(group.id, tab.id, $event)"
-                  @drop="onGroupItemDrop(group.id, tab.id, $event)"
-                >
-                  <button
-                    class="motion-overlay__group-tab-main"
-                    type="button"
-                    draggable="true"
-                    @click="onGroupTabClick(tab)"
-                    @auxclick.prevent="(event) => event.button === 1 && onGroupTabMiddleClick(tab)"
-                    @dragstart="onGroupItemDragStart(group.id, tab.id, $event)"
-                    @dragend="onGroupItemDragEnd"
+              <div v-if="!group.collapsed">
+                <ul v-if="group.tabs.length" class="motion-overlay__group-list">
+                  <li
+                    v-for="tab in group.tabs"
+                    :key="tab.id"
+                    class="motion-overlay__group-tab"
+                    @dragover="onGroupItemDragOver(group.id, tab.id, $event)"
+                    @drop="onGroupItemDrop(group.id, tab.id, $event)"
                   >
-                    <span class="motion-overlay__group-tab-icon" aria-hidden="true">
-                      <img v-if="tab.favIconUrl" :src="tab.favIconUrl" alt="" />
-                      <span v-else>{{ getTabFallbackTitle(tab.title, tab.url).slice(0, 1).toUpperCase() }}</span>
-                    </span>
-                    <span class="motion-overlay__group-tab-title">{{ tab.title }}</span>
-                  </button>
+                    <button
+                      class="motion-overlay__group-tab-main"
+                      type="button"
+                      draggable="true"
+                      @click="onGroupTabClick(tab)"
+                      @auxclick.prevent="(event) => event.button === 1 && onGroupTabMiddleClick(tab)"
+                      @dragstart="onGroupItemDragStart(group.id, tab.id, $event)"
+                      @dragend="onGroupItemDragEnd"
+                    >
+                      <span class="motion-overlay__group-tab-icon" aria-hidden="true">
+                        <img v-if="tab.favIconUrl" :src="tab.favIconUrl" alt="" />
+                        <span v-else>{{ getTabFallbackTitle(tab.title, tab.url).slice(0, 1).toUpperCase() }}</span>
+                      </span>
+                      <span class="motion-overlay__group-tab-title">{{ tab.title }}</span>
+                    </button>
 
-                  <button
-                    type="button"
-                    class="motion-overlay__group-tab-menu-button"
-                    :aria-label="`Menu for ${tab.title}`"
-                    @click.stop="toggleItemMenu(group.id, tab.id)"
-                  >
-                    ⋮
-                  </button>
+                    <button
+                      type="button"
+                      class="motion-overlay__group-tab-menu-button"
+                      :aria-label="`Menu for ${tab.title}`"
+                      @click.stop="toggleItemMenu(group.id, tab.id)"
+                    >
+                      ⋮
+                    </button>
 
-                  <div
-                    v-if="activeItemMenu?.groupId === group.id && activeItemMenu?.tabId === tab.id"
-                    class="motion-overlay__group-tab-menu"
-                  >
-                    <button type="button" @click="startEditItem(group.id, tab)">Edit</button>
-                    <button type="button" @click="deleteItem">Delete</button>
-                  </div>
-                </li>
-              </ul>
+                    <div
+                      v-if="activeItemMenu?.groupId === group.id && activeItemMenu?.tabId === tab.id"
+                      class="motion-overlay__group-tab-menu"
+                    >
+                      <button type="button" @click="startEditItem(group.id, tab)">Edit</button>
+                      <button type="button" @click="deleteItem">Delete</button>
+                    </div>
+                  </li>
+                </ul>
+                <div v-else class="motion-overlay__group-empty">
+                  <svg class="motion-overlay__group-empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 6V12L15 15M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <p class="motion-overlay__group-empty-text">Drop tabs here</p>
+                </div>
+              </div>
             </Transition>
           </article>
         </section>
