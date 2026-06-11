@@ -93,7 +93,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === CLOSE_TAB_MESSAGE && typeof message.tabId === 'number') {
     chrome.tabs.remove(message.tabId, () => {
       void chrome.runtime.lastError;
+      sendResponse({ closed: true });
     });
+    return true;
   }
 
   if (message?.type === 'motion-fss:go-back') {

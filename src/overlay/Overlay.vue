@@ -39,6 +39,8 @@ type GroupRecord = {
 type ItemMenuState = {
   groupId: string;
   tabId: string;
+  x: number;
+  y: number;
 } | null;
 
 type EditingState = {
@@ -51,6 +53,22 @@ type GroupDragState = {
   groupId: string;
   tabId: string;
 } | null;
+
+type GroupMenuPos = {
+  groupId: string;
+  x: number;
+  y: number;
+} | null;
+
+type SearchSuggestion = {
+  id: string;
+  title: string;
+  url: string;
+  favIconUrl: string | null;
+  source: 'tab' | 'group';
+  tabId?: number;
+  score: number;
+};
 
 const props = defineProps<{
   tabs: OpenTab[];
@@ -77,32 +95,55 @@ const hydrated = ref(false);
 const isNewGroupOpen = ref(false);
 const newGroupName = ref('');
 const newGroupInput = ref<HTMLInputElement | null>(null);
+const newGroupPopup = ref<{ x: number; y: number } | null>(null);
 const activeGroupId = ref<string | null>(null);
 const activeItemMenu = ref<ItemMenuState>(null);
-const activeGroupMenu = ref<string | null>(null);
+const activeGroupMenu = ref<GroupMenuPos>(null);
 const editingItem = ref<EditingState>(null);
+const editItemPopup = ref<{ x: number; y: number } | null>(null);
 const editingGroup = ref<{ groupId: string; name: string } | null>(null);
+const editGroupPopup = ref<{ x: number; y: number } | null>(null);
+const showSettings = ref(false);
 const quickLinks = ref<QuickLink[]>([]);
 const searchInput = ref<HTMLInputElement | null>(null);
 const isNewQuickLinkOpen = ref(false);
+const newQuickLinkPopup = ref<{ x: number; y: number } | null>(null);
 const newQuickLinkUrl = ref('');
+const newQuickLinkInput = ref<HTMLInputElement | null>(null);
 const searchQuery = ref('');
-const searchSuggestions = computed(() => {
+const searchSuggestions = computed((): SearchSuggestion[] => {
   const q = searchQuery.value.trim().toLowerCase();
   if (!q) return [];
 
-  const results: OpenTab[] = [];
-  const seen = new Set<number>();
-  for (const tab of localTabs.value) {
-    const title = (tab.title ?? '').toLowerCase();
-    const url = (tab.url ?? '').toLowerCase();
-    if ((title.includes(q) || url.includes(q)) && !seen.has(tab.id)) {
-      results.push(tab);
-      seen.add(tab.id);
-      if (results.length >= 8) break;
+  const results: SearchSuggestion[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups.value) {
+    for (const tab of group.tabs) {
+      const title = (tab.title ?? '').toLowerCase();
+      const url = (tab.url ?? '').toLowerCase();
+      const normUrl = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      const key = normUrl || title;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const titleMatch = title.includes(q);
+      const urlMatch = url.includes(q);
+      if (!titleMatch && !urlMatch) continue;
+
+      let score = 0;
+      if (title === q) score = 100;
+      else if (title.startsWith(q)) score = 80;
+      else if (titleMatch) score = 60;
+      else if (url.startsWith(q)) score = 40;
+      else if (urlMatch) score = 20;
+
+      results.push({ id: tab.id, title: tab.title, url: tab.url, favIconUrl: tab.favIconUrl, source: 'group', score });
     }
   }
-  return results;
+
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, 8);
 });
 const searchSelectedIndex = ref(-1);
 const isSearchFocused = ref(false);
@@ -113,6 +154,46 @@ const dragGroupId = ref<string | null>(null);
 const dragOverGroupIndex = ref<string | null>(null);
 const draggingGroupItem = ref<GroupDragState>(null);
 const dragOverGroupItem = ref<GroupDragState>(null);
+
+function toggleGroupMenu(groupId: string, event: MouseEvent) {
+  closeAllPopups();
+  activeGroupMenu.value = activeGroupMenu.value?.groupId === groupId ? null : { groupId, x: event.clientX, y: event.clientY };
+  event.stopPropagation();
+}
+
+function deleteGroup(groupId: string) {
+  groups.value = groups.value.filter((entry) => entry.id !== groupId);
+  activeGroupMenu.value = null;
+  if (activeGroupId.value === groupId) {
+    activeGroupId.value = null;
+  }
+}
+
+function openAllGroupTabs(groupId: string) {
+  const group = groups.value.find((entry) => entry.id === groupId);
+  if (!group) return;
+  for (const tab of group.tabs) {
+    sendMessage(OPEN_URL_MESSAGE, { url: tab.url });
+  }
+  activeGroupMenu.value = null;
+}
+
+function startEditGroup(groupId: string, name: string, event: MouseEvent) {
+  closeAllPopups();
+  editingGroup.value = { groupId, name };
+  editGroupPopup.value = { x: event.clientX, y: event.clientY };
+  event.stopPropagation();
+}
+
+function saveEditGroup() {
+  if (!editingGroup.value) return;
+  const group = groups.value.find((entry) => entry.id === editingGroup.value?.groupId);
+  if (group) {
+    group.name = editingGroup.value.name.trim() || group.name;
+    groups.value = [...groups.value];
+  }
+  editingGroup.value = null;
+}
 
 function createId(prefix: string) {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -166,14 +247,29 @@ function activateSelectedTab() {
   props.onClose();
 }
 
-function openTab(tab: OpenTab) {
-  sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: tab.id });
+function openSuggestion(suggestion: SearchSuggestion) {
+  if (suggestion.source === 'tab' && suggestion.tabId) {
+    sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: suggestion.tabId });
+  } else {
+    const existingTab = localTabs.value.find((t) => t.url === suggestion.url || t.url.replace(/\/$/, '') === suggestion.url.replace(/\/$/, ''));
+    if (existingTab?.id) {
+      sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: existingTab.id });
+    } else {
+      sendMessage(OPEN_URL_MESSAGE, { url: suggestion.url });
+    }
+  }
   props.onClose();
 }
 
 function closeTab(tab: OpenTab) {
-  sendMessage(CLOSE_TAB_MESSAGE, { tabId: tab.id });
-  fetchOpenTabs();
+  localTabs.value = localTabs.value.filter((t) => t.id !== tab.id);
+  chrome.runtime.sendMessage(
+    { type: CLOSE_TAB_MESSAGE, tabId: tab.id },
+    () => {
+      void chrome.runtime.lastError;
+      setTimeout(() => fetchOpenTabs(), 100);
+    }
+  );
 }
 
 function openNewTab() {
@@ -181,13 +277,12 @@ function openNewTab() {
   props.onClose();
 }
 
-function openNewGroup() {
+function openNewGroup(event: MouseEvent) {
+  closeAllPopups();
   isNewGroupOpen.value = true;
   newGroupName.value = '';
-  activeItemMenu.value = null;
-  activeGroupMenu.value = null;
-  editingItem.value = null;
-
+  newGroupPopup.value = { x: event.clientX, y: event.clientY };
+  event.stopPropagation();
   void nextTick(() => {
     newGroupInput.value?.focus();
   });
@@ -331,22 +426,19 @@ function onGroupTabMiddleClick(tab: GroupTabRecord) {
   }
 }
 
-function toggleItemMenu(groupId: string, tabId: string) {
-  activeGroupMenu.value = null;
-  activeQuickLinkMenu.value = null;
+function toggleItemMenu(groupId: string, tabId: string, event: MouseEvent) {
+  closeAllPopups();
   activeItemMenu.value =
     activeItemMenu.value?.groupId === groupId && activeItemMenu.value?.tabId === tabId
-      ? null
-      : { groupId, tabId };
+      ? null : { groupId, tabId, x: event.clientX, y: event.clientY };
+  event.stopPropagation();
 }
 
-function startEditItem(groupId: string, tab: GroupTabRecord) {
-  activeItemMenu.value = null;
-  editingItem.value = {
-    groupId,
-    tabId: tab.id,
-    title: tab.title
-  };
+function startEditItem(groupId: string, tab: GroupTabRecord, event: MouseEvent) {
+  closeAllPopups();
+  editingItem.value = { groupId, tabId: tab.id, title: tab.title };
+  editItemPopup.value = { x: event.clientX, y: event.clientY };
+  event.stopPropagation();
 }
 
 function saveEditItem() {
@@ -374,43 +466,6 @@ function deleteItem() {
   activeItemMenu.value = null;
 }
 
-function toggleGroupMenu(groupId: string) {
-  activeItemMenu.value = null;
-  activeQuickLinkMenu.value = null;
-  activeGroupMenu.value = activeGroupMenu.value === groupId ? null : groupId;
-}
-
-function deleteGroup(groupId: string) {
-  groups.value = groups.value.filter((entry) => entry.id !== groupId);
-  activeGroupMenu.value = null;
-}
-
-function openAllGroupTabs(groupId: string) {
-  const group = groups.value.find((entry) => entry.id === groupId);
-  if (!group) return;
-
-  for (const tab of group.tabs) {
-    sendMessage(OPEN_URL_MESSAGE, { url: tab.url });
-  }
-  activeGroupMenu.value = null;
-}
-
-function startEditGroup(groupId: string, name: string) {
-  activeGroupMenu.value = null;
-  editingGroup.value = { groupId, name };
-}
-
-function saveEditGroup() {
-  if (!editingGroup.value) return;
-
-  const group = groups.value.find((entry) => entry.id === editingGroup.value?.groupId);
-  if (group) {
-    group.name = editingGroup.value.name.trim() || group.name;
-    groups.value = [...groups.value];
-  }
-  editingGroup.value = null;
-}
-
 function getFavIconUrl(url: string) {
   try {
     const origin = new URL(url).origin;
@@ -420,15 +475,14 @@ function getFavIconUrl(url: string) {
   }
 }
 
-function openAddQuickLink() {
-  activeItemMenu.value = null;
-  activeGroupMenu.value = null;
-  activeQuickLinkMenu.value = null;
+function openAddQuickLink(event: MouseEvent) {
+  closeAllPopups();
   isNewQuickLinkOpen.value = true;
   newQuickLinkUrl.value = '';
-
+  newQuickLinkPopup.value = { x: event.clientX, y: event.clientY };
+  event.stopPropagation();
   void nextTick(() => {
-    document.getElementById('motion-fss-quicklink-url')?.focus();
+    newQuickLinkInput.value?.focus();
   });
 }
 
@@ -499,6 +553,27 @@ function onTabDragStart(tabId: number, event: DragEvent) {
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move';
   }
+  const el = event.currentTarget as HTMLElement;
+  const ghost = el.cloneNode(true) as HTMLElement;
+  const rect = el.getBoundingClientRect();
+  ghost.querySelector('.motion-overlay__tab-close, .motion-overlay__group-tab-menu-button')?.remove();
+  ghost.style.position = 'fixed';
+  ghost.style.left = `${rect.left}px`;
+  ghost.style.top = `${rect.top}px`;
+  ghost.style.width = `${rect.width}px`;
+  ghost.style.height = `${rect.height}px`;
+  ghost.style.opacity = '0.92';
+  ghost.style.pointerEvents = 'none';
+  ghost.style.transform = 'rotate(1deg)';
+  ghost.style.zIndex = '9999';
+  ghost.style.margin = '0';
+  ghost.style.border = '1px solid rgba(0,0,0,0.08)';
+  ghost.style.borderRadius = '8px';
+  ghost.style.background = '#ffffff';
+  // Keep ghost inside the shadow DOM so overlay styles still apply
+  el.closest('.motion-overlay')?.appendChild(ghost);
+  event.dataTransfer?.setDragImage(ghost, el.offsetWidth / 2, el.offsetHeight / 2);
+  requestAnimationFrame(() => ghost.remove());
 }
 
 function onTabDragEnd() {
@@ -512,6 +587,26 @@ function onGroupItemDragStart(groupId: string, tabId: string, event: DragEvent) 
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move';
   }
+  const el = event.currentTarget as HTMLElement;
+  const ghost = el.cloneNode(true) as HTMLElement;
+  const rect = el.getBoundingClientRect();
+  ghost.querySelector('.motion-overlay__tab-close, .motion-overlay__group-tab-menu-button')?.remove();
+  ghost.style.position = 'fixed';
+  ghost.style.left = `${rect.left}px`;
+  ghost.style.top = `${rect.top}px`;
+  ghost.style.width = `${rect.width}px`;
+  ghost.style.height = `${rect.height}px`;
+  ghost.style.opacity = '0.92';
+  ghost.style.pointerEvents = 'none';
+  ghost.style.transform = 'rotate(1deg)';
+  ghost.style.zIndex = '9999';
+  ghost.style.margin = '0';
+  ghost.style.border = '1px solid rgba(0,0,0,0.08)';
+  ghost.style.borderRadius = '6px';
+  ghost.style.background = '#ffffff';
+  el.closest('.motion-overlay')?.appendChild(ghost);
+  event.dataTransfer?.setDragImage(ghost, el.offsetWidth / 2, el.offsetHeight / 2);
+  requestAnimationFrame(() => ghost.remove());
 }
 
 function onGroupItemDragEnd() {
@@ -522,6 +617,7 @@ function onGroupItemDragEnd() {
 function onGroupItemDragOver(groupId: string, tabId: string, event: DragEvent) {
   event.preventDefault();
   dragOverGroupItem.value = { groupId, tabId };
+  dragOverGroupId.value = groupId;
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = 'move';
   }
@@ -622,6 +718,17 @@ function onSidebarGroupDragStart(groupId: string, event: DragEvent) {
   }
 }
 
+function moveGroup(fromId: string, toId: string) {
+  const from = groups.value.findIndex((g) => g.id === fromId);
+  const to = groups.value.findIndex((g) => g.id === toId);
+  if (from >= 0 && to >= 0 && from !== to) {
+    const next = [...groups.value];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    groups.value = next;
+  }
+}
+
 function onSidebarGroupDragOver(groupId: string, event: DragEvent) {
   event.preventDefault();
   dragOverGroupIndex.value = groupId;
@@ -630,8 +737,12 @@ function onSidebarGroupDragOver(groupId: string, event: DragEvent) {
   }
 }
 
-function onSidebarGroupDragLeave() {
-  dragOverGroupIndex.value = null;
+function onSidebarGroupDragLeave(event: DragEvent) {
+  const target = event.currentTarget as HTMLElement;
+  const related = event.relatedTarget as HTMLElement | null;
+  if (!related || !target.contains(related)) {
+    dragOverGroupIndex.value = null;
+  }
 }
 
 function onSidebarListDrop(event: DragEvent) {
@@ -656,27 +767,26 @@ function onSidebarListDrop(event: DragEvent) {
 
 function onSidebarGroupDrop(targetGroupId: string, event: DragEvent) {
   event.preventDefault();
+  event.stopPropagation();
 
   const data = event.dataTransfer?.getData('text/plain');
   if (!data) return;
 
+  let sourceTabId: number | null = null;
+
   try {
     const parsed = JSON.parse(data);
-    if (parsed.groupDrag && parsed.groupId) {
-      const fromIndex = groups.value.findIndex((g) => g.id === parsed.groupId);
-      const toIndex = groups.value.findIndex((g) => g.id === targetGroupId);
-      if (fromIndex >= 0 && toIndex >= 0 && fromIndex !== toIndex) {
-        const next = [...groups.value];
-        const [moved] = next.splice(fromIndex, 1);
-        next.splice(toIndex, 0, moved);
-        groups.value = next;
-      }
+    if (parsed && typeof parsed === 'object' && parsed.groupDrag && parsed.groupId) {
+      moveGroup(parsed.groupId, targetGroupId);
+    } else {
+      sourceTabId = typeof parsed === 'number' ? parsed : Number(data);
     }
   } catch {
-    const sourceTabId = Number(data);
-    if (Number.isFinite(sourceTabId)) {
-      addTabToGroup(targetGroupId, sourceTabId);
-    }
+    sourceTabId = Number(data);
+  }
+
+  if (sourceTabId !== null && Number.isFinite(sourceTabId)) {
+    addTabToGroup(targetGroupId, sourceTabId);
   }
 
   dragGroupId.value = null;
@@ -684,26 +794,29 @@ function onSidebarGroupDrop(targetGroupId: string, event: DragEvent) {
   dragTabId.value = null;
 }
 
-function closeMenusOnly() {
-  if (activeItemMenu.value || activeGroupMenu.value || activeQuickLinkMenu.value) {
-    activeItemMenu.value = null;
-    activeGroupMenu.value = null;
-    activeQuickLinkMenu.value = null;
-  }
+function closeAllPopups() {
+  showSettings.value = false;
+  activeItemMenu.value = null;
+  activeGroupMenu.value = null;
+  activeQuickLinkMenu.value = null;
+  editingItem.value = null;
+  editingGroup.value = null;
+  editItemPopup.value = null;
+  editGroupPopup.value = null;
+  newGroupPopup.value = null;
+  newQuickLinkPopup.value = null;
+  if (isNewGroupOpen.value) { isNewGroupOpen.value = false; newGroupName.value = ''; }
+  if (isNewQuickLinkOpen.value) { isNewQuickLinkOpen.value = false; newQuickLinkUrl.value = ''; }
 }
 
-function closeAllMenus() {
-  if (activeItemMenu.value || activeGroupMenu.value || editingItem.value || editingGroup.value || isNewGroupOpen.value || isNewQuickLinkOpen.value || activeQuickLinkMenu.value) {
-    activeItemMenu.value = null;
-    activeGroupMenu.value = null;
-    editingItem.value = null;
-    editingGroup.value = null;
-    activeQuickLinkMenu.value = null;
-    if (isNewGroupOpen.value) closeNewGroup();
-    if (isNewQuickLinkOpen.value) closeAddQuickLink();
+function onShellClick(event: MouseEvent) {
+  const target = event.target as HTMLElement;
+  if (target.closest('.motion-overlay__popup, .motion-overlay__group-menu, .motion-overlay__group-tab-menu, .motion-overlay__ql-menu, .motion-overlay__search-suggestions')) {
     return;
   }
-  props.onClose();
+  if (activeItemMenu.value || activeGroupMenu.value || editingItem.value || editingGroup.value || isNewGroupOpen.value || isNewQuickLinkOpen.value || activeQuickLinkMenu.value) {
+    closeAllPopups();
+  }
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -719,35 +832,40 @@ function onKeydown(event: KeyboardEvent) {
     return;
   }
 
+  const isPopupOpen = isNewGroupOpen.value || isNewQuickLinkOpen.value || editingItem.value || editingGroup.value;
+
   if (event.key === 'Tab') {
+    if (isPopupOpen) return;
     if (isSearchFocused.value && searchSuggestions.value.length) {
       event.preventDefault();
       const delta = event.shiftKey ? -1 : 1;
-      searchSelectedIndex.value = (searchSelectedIndex.value + delta + searchSuggestions.value.length) % searchSuggestions.value.length;
-      return;
+      const next = (searchSelectedIndex.value + delta + searchSuggestions.value.length) % searchSuggestions.value.length;
+      searchSelectedIndex.value = next;
+      // Scroll the selected suggestion into view
+      void nextTick(() => {
+        const host = searchInput.value?.closest('.motion-overlay') as HTMLElement | null;
+        if (!host) return;
+        const suggestion = host.querySelector('.motion-overlay__search-suggestion--selected') as HTMLElement | null;
+        suggestion?.scrollIntoView?.({ block: 'nearest' });
+      });
+    } else {
+      event.preventDefault();
+      moveSelection(event.shiftKey ? -1 : 1);
     }
-    event.preventDefault();
-    moveSelection(event.shiftKey ? -1 : 1);
     return;
   }
 
   if (event.key === 'Enter') {
     if (isNewGroupOpen.value || isNewQuickLinkOpen.value) {
       event.preventDefault();
-
-      if (isNewGroupOpen.value) {
-        createGroup();
-      } else {
-        addQuickLink();
-      }
+      if (isNewGroupOpen.value) { createGroup(); } else { addQuickLink(); }
       return;
     }
 
     const q = searchQuery.value.trim();
     if (searchSuggestions.value.length && searchSelectedIndex.value >= 0) {
       event.preventDefault();
-      const tab = searchSuggestions.value[searchSelectedIndex.value];
-      openTab(tab);
+      openSuggestion(searchSuggestions.value[searchSelectedIndex.value]);
       return;
     }
 
@@ -761,7 +879,6 @@ function onKeydown(event: KeyboardEvent) {
           targetUrl = `https://www.google.com/search?q=${encodeURIComponent(targetUrl)}`;
         }
       }
-
       sendMessage(OPEN_URL_MESSAGE, { url: targetUrl, currentTab: event.shiftKey });
       props.onClose();
       return;
@@ -773,6 +890,7 @@ function onKeydown(event: KeyboardEvent) {
   }
 
   if (event.key >= '1' && event.key <= '9') {
+    if (isPopupOpen) return;
     const index = parseInt(event.key) - 1;
     if (index < quickLinks.value.length) {
       event.preventDefault();
@@ -781,16 +899,11 @@ function onKeydown(event: KeyboardEvent) {
     return;
   }
 
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    if (isSearchFocused.value && searchSuggestions.value.length) {
-      event.preventDefault();
-      const delta = event.key === 'ArrowDown' ? 1 : -1;
-      searchSelectedIndex.value = Math.min(
-        Math.max(searchSelectedIndex.value + delta, 0),
-        searchSuggestions.value.length - 1
-      );
-      return;
-    }
+  if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && isSearchFocused.value && searchSuggestions.value.length) {
+    event.preventDefault();
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    searchSelectedIndex.value = Math.min(Math.max(searchSelectedIndex.value + delta, 0), searchSuggestions.value.length - 1);
+    return;
   }
 
   if (event.key === 'k' && (event.altKey || event.metaKey)) {
@@ -807,7 +920,7 @@ function onKeydown(event: KeyboardEvent) {
       return;
     }
     event.preventDefault();
-    closeAllMenus();
+    closeAllPopups();
   }
 }
 
@@ -902,14 +1015,19 @@ watch(activeGroupId, (id) => {
 });
 
 onBeforeUnmount(() => {
-  persistGroups();
+  if (hydrated.value) {
+    chrome.storage.local.set({ [GROUPS_STORAGE_KEY]: cloneGroups(groups.value) });
+    if (activeGroupId.value) {
+      chrome.storage.local.set({ [ACTIVE_GROUP_STORAGE_KEY]: activeGroupId.value });
+    }
+  }
   window.removeEventListener('keydown', onKeydown, true);
 });
 </script>
 
 <template>
-  <section class="motion-overlay" :class="{ 'motion-overlay--searching': isSearchActive }" role="dialog" aria-modal="true" aria-label="Open tabs overlay" @click.self="closeAllMenus">
-    <div class="motion-overlay__shell" :class="{ 'motion-overlay__shell--searching': isSearchActive }" @click.self="closeAllMenus" @click="closeMenusOnly">
+  <section class="motion-overlay" :class="{ 'motion-overlay--searching': isSearchActive }" role="dialog" aria-modal="true" aria-label="Open tabs overlay" @click.self="closeAllPopups">
+    <div class="motion-overlay__shell" :class="{ 'motion-overlay--searching': isSearchActive }" @click="onShellClick">
       <aside class="motion-overlay__rail">
         <div class="motion-overlay__rail-header">
           <div class="motion-overlay__title-wrap">
@@ -1001,9 +1119,9 @@ onBeforeUnmount(() => {
                   <path d="M14.9536 14.9458L21 21M17 10C17 13.866 13.866 17 10 17C6.13401 17 3 13.866 3 10C3 6.13401 6.13401 3 10 3C13.866 3 17 6.13401 17 10Z" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </span>
-              <input ref="searchInput" v-model="searchQuery" type="text" placeholder="Search the web..." @focus="isSearchFocused = true" @blur="isSearchFocused = false" />
+              <input ref="searchInput" v-model="searchQuery" type="text" placeholder="Search the web..." @focus="isSearchFocused = true" @blur="isSearchFocused = false; setTimeout(() => { searchQuery = ''; searchSelectedIndex = -1; }, 120)" />
             </label>
-            <div v-if="searchSuggestions.length" class="motion-overlay__search-suggestions">
+            <div v-if="isSearchFocused && searchSuggestions.length" class="motion-overlay__search-suggestions">
               <button
                 v-for="(suggestion, sIndex) in searchSuggestions"
                 :key="suggestion.id"
@@ -1011,7 +1129,7 @@ onBeforeUnmount(() => {
                 class="motion-overlay__search-suggestion"
                 :style="{ '--index': sIndex }"
                 :class="{ 'motion-overlay__search-suggestion--selected': sIndex === searchSelectedIndex }"
-                @click="openTab(suggestion)"
+                @click="openSuggestion(suggestion)"
                 @mousedown.prevent
               >
                 <span class="motion-overlay__search-suggestion-icon" aria-hidden="true">
@@ -1024,7 +1142,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <button type="button" class="motion-overlay__icon-button" aria-label="Settings">
+          <button type="button" class="motion-overlay__icon-button" :class="{ 'motion-overlay__icon-button--active': showSettings }" aria-label="Settings" @click="showSettings = !showSettings">
             <svg width="800px" height="800px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
               <circle cx="12" cy="12" r="3" stroke="#1C274C" stroke-width="1.5"/>
               <path d="M13.7654 2.15224C13.3978 2 12.9319 2 12 2C11.0681 2 10.6022 2 10.2346 2.15224C9.74457 2.35523 9.35522 2.74458 9.15223 3.23463C9.05957 3.45834 9.0233 3.7185 9.00911 4.09799C8.98826 4.65568 8.70226 5.17189 8.21894 5.45093C7.73564 5.72996 7.14559 5.71954 6.65219 5.45876C6.31645 5.2813 6.07301 5.18262 5.83294 5.15102C5.30704 5.08178 4.77518 5.22429 4.35436 5.5472C4.03874 5.78938 3.80577 6.1929 3.33983 6.99993C2.87389 7.80697 2.64092 8.21048 2.58899 8.60491C2.51976 9.1308 2.66227 9.66266 2.98518 10.0835C3.13256 10.2756 3.3397 10.437 3.66119 10.639C4.1338 10.936 4.43789 11.4419 4.43786 12C4.43783 12.5581 4.13375 13.0639 3.66118 13.3608C3.33965 13.5629 3.13248 13.7244 2.98508 13.9165C2.66217 14.3373 2.51966 14.8691 2.5889 15.395C2.64082 15.7894 2.87379 16.193 3.33973 17C3.80568 17.807 4.03865 18.2106 4.35426 18.4527C4.77508 18.7756 5.30694 18.9181 5.83284 18.8489C6.07289 18.8173 6.31632 18.7186 6.65204 18.5412C7.14547 18.2804 7.73556 18.27 8.2189 18.549C8.70224 18.8281 8.98826 19.3443 9.00911 19.9021C9.02331 20.2815 9.05957 20.5417 9.15223 20.7654C9.35522 21.2554 9.74457 21.6448 10.2346 21.8478C10.6022 22 11.0681 22 12 22C12.9319 22 13.3978 22 13.7654 21.8478C14.2554 21.6448 14.6448 21.2554 14.8477 20.7654C14.9404 20.5417 14.9767 20.2815 14.9909 19.902C15.0117 19.3443 15.2977 18.8281 15.781 18.549C16.2643 18.2699 16.8544 18.2804 17.3479 18.5412C17.6836 18.7186 17.927 18.8172 18.167 18.8488C18.6929 18.9181 19.2248 18.7756 19.6456 18.4527C19.9612 18.2105 20.1942 17.807 20.6601 16.9999C21.1261 16.1929 21.3591 15.7894 21.411 15.395C21.4802 14.8691 21.3377 14.3372 21.0148 13.9164C20.8674 13.7243 20.6602 13.5628 20.3387 13.3608C19.8662 13.0639 19.5621 12.558 19.5621 11.9999C19.5621 11.4418 19.8662 10.9361 20.3387 10.6392C20.6603 10.4371 20.8675 10.2757 21.0149 10.0835C21.3378 9.66273 21.4803 9.13087 21.4111 8.60497C21.3592 8.21055 21.1262 7.80703 20.6602 7C20.1943 6.19297 19.9613 5.78945 19.6457 5.54727C19.2249 5.22436 18.693 5.08185 18.1671 5.15109C17.9271 5.18269 17.6837 5.28136 17.3479 5.4588C16.8545 5.71959 16.2644 5.73002 15.7811 5.45096C15.2977 5.17191 15.0117 4.65566 14.9909 4.09794C14.9767 3.71848 14.9404 3.45833 14.8477 3.23463C14.6448 2.74458 14.2554 2.35523 13.7654 2.15224Z" stroke="#1C274C" stroke-width="1.5"/>
@@ -1032,45 +1150,42 @@ onBeforeUnmount(() => {
           </button>
         </header>
 
-        <div v-if="quickLinks.length || quickLinks.length < MAX_QUICK_LINKS" class="motion-overlay__quicklinks">
-          <template v-for="i in MAX_QUICK_LINKS" :key="i">
-            <div
-              v-if="quickLinks[i - 1]"
-              class="motion-overlay__quicklink"
-              :title="quickLinks[i - 1].name"
-              @click="openQuickLink(i - 1)"
-              @contextmenu.prevent="toggleQuickLinkMenu(quickLinks[i - 1].id)"
-            >
-              <img v-if="quickLinks[i - 1].favIconUrl" :src="quickLinks[i - 1].favIconUrl" :alt="quickLinks[i - 1].name" />
-              <span v-else class="motion-overlay__quicklink-letter">{{ quickLinks[i - 1].name.slice(0, 1).toUpperCase() }}</span>
+        <div v-show="!showSettings" class="motion-overlay__main-content">
+          <div v-if="quickLinks.length || quickLinks.length < MAX_QUICK_LINKS" class="motion-overlay__quicklinks">
+            <template v-for="i in MAX_QUICK_LINKS" :key="i">
               <div
-                v-if="activeQuickLinkMenu === quickLinks[i - 1].id"
-                class="motion-overlay__ql-menu"
-                @click.stop
+                v-if="quickLinks[i - 1]"
+                class="motion-overlay__quicklink"
+                :title="quickLinks[i - 1].name"
+                @click="openQuickLink(i - 1)"
+                @contextmenu.prevent="toggleQuickLinkMenu(quickLinks[i - 1].id)"
               >
-                <button type="button" @click="removeQuickLink(quickLinks[i - 1].id)">Delete</button>
+                <img v-if="quickLinks[i - 1].favIconUrl" :src="quickLinks[i - 1].favIconUrl" :alt="quickLinks[i - 1].name" />
+                <span v-else class="motion-overlay__quicklink-letter">{{ quickLinks[i - 1].name.slice(0, 1).toUpperCase() }}</span>
+                <div v-if="activeQuickLinkMenu === quickLinks[i - 1].id" class="motion-overlay__ql-menu" @click.stop>
+                  <button type="button" class="menu-delete" @click="removeQuickLink(quickLinks[i - 1].id)">Delete</button>
+                </div>
               </div>
-            </div>
-            <button
-              v-else-if="i === quickLinks.length + 1 && quickLinks.length < MAX_QUICK_LINKS"
-              type="button"
-              class="motion-overlay__quicklink motion-overlay__quicklink--add"
-              @click="openAddQuickLink"
-              aria-label="Add quick link"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 6V18M6 12H18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
-            <div v-else class="motion-overlay__quicklink motion-overlay__quicklink--empty"></div>
-          </template>
-        </div>
+              <button
+                v-else-if="i === quickLinks.length + 1 && quickLinks.length < MAX_QUICK_LINKS"
+                type="button"
+                class="motion-overlay__quicklink motion-overlay__quicklink--add"
+                @click="(e) => openAddQuickLink(e)"
+                aria-label="Add quick link"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 6V18M6 12H18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div v-else class="motion-overlay__quicklink motion-overlay__quicklink--empty"></div>
+            </template>
+          </div>
 
-        <section class="motion-overlay__groups-panel" aria-label="Groups">
+          <section class="motion-overlay__groups-panel" aria-label="Groups">
           <div class="motion-overlay__groups-sidebar">
             <div class="motion-overlay__groups-sidebar-header">
               <h2>Groups</h2>
-              <button type="button" class="motion-overlay__groups-add-btn" @click="openNewGroup" aria-label="New group">
+              <button type="button" class="motion-overlay__groups-add-btn" @click="(e) => openNewGroup(e)" aria-label="New group">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M12 6V18M6 12H18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
@@ -1082,25 +1197,19 @@ onBeforeUnmount(() => {
               @dragover.prevent
               @drop.prevent="onSidebarListDrop"
             >
-              <button
-                v-for="group in groups"
-                :key="group.id"
-                type="button"
-                class="motion-overlay__groups-sidebar-item"
-                :class="{
-                  'motion-overlay__groups-sidebar-item--active': activeGroupId === group.id,
-                  'motion-overlay__groups-sidebar-item--drag-over': dragOverGroupIndex === group.id
-                }"
-                draggable="true"
-                @click="activeGroupId = group.id"
-                @contextmenu.prevent="startEditGroup(group.id, group.name)"
-                @dragstart="onSidebarGroupDragStart(group.id, $event)"
-                @dragover="onSidebarGroupDragOver(group.id, $event)"
-                @dragleave="onSidebarGroupDragLeave"
-                @drop="onSidebarGroupDrop(group.id, $event)"
+              <button v-for="group in groups" :key="group.id" type="button" class="motion-overlay__groups-sidebar-item"
+                :class="{ 'motion-overlay__groups-sidebar-item--active': activeGroupId === group.id, 'motion-overlay__groups-sidebar-item--drag-over': dragOverGroupIndex === group.id }"
+                draggable="true" @click="activeGroupId = group.id" @contextmenu.prevent="(e) => startEditGroup(group.id, group.name, e)"
+                @dragstart="onSidebarGroupDragStart(group.id, $event)" @dragover="onSidebarGroupDragOver(group.id, $event)"
+                @dragleave="onSidebarGroupDragLeave" @drop.stop="onSidebarGroupDrop(group.id, $event)"
               >
                 <span class="motion-overlay__groups-sidebar-item-name">{{ group.name }}</span>
-                <span class="motion-overlay__groups-sidebar-item-count">{{ group.tabs.length }}</span>
+                <span class="motion-overlay__groups-sidebar-item-count" @click.stop="(e) => toggleGroupMenu(group.id, e)">{{ group.tabs.length }}</span>
+                <div v-if="activeGroupMenu?.groupId === group.id" class="motion-overlay__group-menu" :style="{ left: activeGroupMenu.x + 'px', top: activeGroupMenu.y + 'px' }" @click.stop>
+                  <button type="button" @click="(e) => startEditGroup(group.id, group.name, e)">Edit</button>
+                  <button type="button" class="menu-delete" @click="deleteGroup(group.id)">Delete</button>
+                  <button type="button" @click="openAllGroupTabs(group.id)">Open All Tabs</button>
+                </div>
               </button>
             </div>
             <div v-else class="motion-overlay__groups-sidebar-empty">
@@ -1132,18 +1241,21 @@ onBeforeUnmount(() => {
                   type="button"
                   class="motion-overlay__groups-content-menu-btn"
                   aria-label="Group menu"
-                  @click.stop="toggleGroupMenu(activeGroupId)"
+                  @click.stop="(e) => toggleGroupMenu(activeGroupId, e)"
                 >⋮</button>
-                <div
-                  v-if="activeGroupMenu === activeGroupId"
-                  class="motion-overlay__group-menu"
-                >
-                  <button type="button" @click="startEditGroup(activeGroupId, groups.find((g) => g.id === activeGroupId)?.name ?? '')">Edit</button>
-                  <button type="button" @click="deleteGroup(activeGroupId)">Delete</button>
+                <div v-if="activeGroupMenu?.groupId === activeGroupId" class="motion-overlay__group-menu" :style="{ left: activeGroupMenu.x + 'px', top: activeGroupMenu.y + 'px' }" @click.stop>
+                  <button type="button" @click="(e) => startEditGroup(activeGroupId, groups.find((g) => g.id === activeGroupId)?.name ?? '', e)">Edit</button>
+                  <button type="button" class="menu-delete" @click="deleteGroup(activeGroupId)">Delete</button>
                   <button type="button" @click="openAllGroupTabs(activeGroupId)">Open All Tabs</button>
                 </div>
               </div>
-              <div class="motion-overlay__groups-content-body">
+              <div
+                class="motion-overlay__groups-content-body"
+                :class="{ 'motion-overlay__groups-content-body--drag-over': dragOverGroupId === activeGroupId && ((groups.find((g) => g.id === activeGroupId)?.tabs.length ?? 0) > 0) }"
+                @dragover="onGroupDragOver(activeGroupId, $event)"
+                @drop="onGroupDrop(activeGroupId, $event)"
+                @dragleave="onGroupDragLeave(activeGroupId)"
+              >
                 <template v-if="(groups.find((g) => g.id === activeGroupId)?.tabs.length ?? 0) > 0">
                   <div
                     v-for="tab in groups.find((g) => g.id === activeGroupId)?.tabs"
@@ -1152,8 +1264,8 @@ onBeforeUnmount(() => {
                     draggable="true"
                     @dragstart="onGroupItemDragStart(activeGroupId, tab!.id, $event)"
                     @dragend="onGroupItemDragEnd"
-                    @dragover="onGroupItemDragOver(activeGroupId, tab!.id, $event)"
-                    @drop="onGroupItemDrop(activeGroupId, tab!.id, $event)"
+                    @dragover.stop="onGroupItemDragOver(activeGroupId, tab!.id, $event)"
+                    @drop.stop="onGroupItemDrop(activeGroupId, tab!.id, $event)"
                   >
                     <button
                       class="motion-overlay__group-tab-main"
@@ -1171,18 +1283,26 @@ onBeforeUnmount(() => {
                       type="button"
                       class="motion-overlay__group-tab-menu-button"
                       :aria-label="`Menu for ${tab!.title}`"
-                      @click.stop="toggleItemMenu(activeGroupId, tab!.id)"
+                      @click.stop="(e) => toggleItemMenu(activeGroupId, tab!.id, e)"
                     >⋮</button>
                     <div
                       v-if="activeItemMenu?.groupId === activeGroupId && activeItemMenu?.tabId === tab!.id"
                       class="motion-overlay__group-tab-menu"
+                      :style="{ left: activeItemMenu.x + 'px', top: activeItemMenu.y + 'px' }"
                     >
-                      <button type="button" @click="startEditItem(activeGroupId, tab!)">Edit</button>
-                      <button type="button" @click="deleteItem">Delete</button>
+                      <button type="button" @click="(e) => startEditItem(activeGroupId, tab!, e)">Edit</button>
+                      <button type="button" class="menu-delete" @click="deleteItem">Delete</button>
                     </div>
                   </div>
                 </template>
-                <div v-else class="motion-overlay__group-empty">
+                <div
+                  v-else
+                  class="motion-overlay__group-empty"
+                  :class="{ 'motion-overlay__group-empty--drag-over': dragOverGroupId === activeGroupId }"
+                  @dragover="onGroupDragOver(activeGroupId, $event)"
+                  @drop="onGroupDrop(activeGroupId, $event)"
+                  @dragleave="onGroupDragLeave(activeGroupId)"
+                >
                   <svg class="motion-overlay__group-empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M12 6V12L15 15M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
@@ -1195,81 +1315,84 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </section>
+        </div>
+
+        <!-- ── Settings page ──────────────────────────────────────────────── -->
+        <div v-show="showSettings" class="motion-overlay__settings">
+          <div class="motion-overlay__settings-section">
+            <h2 class="motion-overlay__settings-title">Keyboard Shortcuts</h2>
+            <div class="motion-overlay__settings-shortcuts">
+              <div class="motion-overlay__settings-shortcut">
+                <span class="motion-overlay__settings-shortcut-label">Close overlay</span>
+                <kbd class="motion-overlay__settings-kbd">Esc</kbd>
+              </div>
+              <div class="motion-overlay__settings-shortcut">
+                <span class="motion-overlay__settings-shortcut-label">Focus search</span>
+                <kbd class="motion-overlay__settings-kbd"><span class="motion-overlay__settings-mod">⌘</span>K</kbd>
+              </div>
+              <div class="motion-overlay__settings-shortcut">
+                <span class="motion-overlay__settings-shortcut-label">Navigate tabs</span>
+                <kbd class="motion-overlay__settings-kbd">Tab</kbd>
+              </div>
+              <div class="motion-overlay__settings-shortcut">
+                <span class="motion-overlay__settings-shortcut-label">Open quick link (1–9)</span>
+                <kbd class="motion-overlay__settings-kbd">1–9</kbd>
+              </div>
+            </div>
+          </div>
+
+          <div class="motion-overlay__settings-section">
+            <h2 class="motion-overlay__settings-title">About</h2>
+            <p class="motion-overlay__settings-about">Motion FSS &mdash; Fast Session Switcher</p>
+            <p class="motion-overlay__settings-version">Version 1.0.0</p>
+          </div>
+        </div>
       </main>
 
-      <div v-if="isNewGroupOpen" class="motion-overlay__popup-backdrop" @click.self="closeNewGroup">
-        <form class="motion-overlay__popup" @submit.prevent="createGroup">
-          <p class="motion-overlay__popup-label">New Group</p>
-          <input
-            ref="newGroupInput"
-            v-model="newGroupName"
-            type="text"
-            placeholder="Group name"
-            maxlength="40"
-            @keydown.esc.prevent="closeNewGroup"
-          />
+      <!-- ── Inline popups (no backdrops, near-mouse) ──────────────────────── -->
+      <div v-if="isNewGroupOpen" class="motion-overlay__popup" :style="{ left: newGroupPopup?.x + 'px', top: newGroupPopup?.y + 'px' }" @click.stop>
+        <p class="motion-overlay__popup-label">New Group</p>
+        <p class="motion-overlay__popup-desc">Enter a name for your new tab group.</p>
+        <form @submit.prevent="createGroup">
+          <input ref="newGroupInput" v-model="newGroupName" type="text" placeholder="Group name" maxlength="40" autofocus @keydown.esc.prevent="closeAllPopups" />
           <div class="motion-overlay__popup-actions">
-            <button type="button" class="motion-overlay__popup-button motion-overlay__popup-button--ghost" @click="closeNewGroup">
-              Cancel
-            </button>
+            <button type="button" class="motion-overlay__popup-button motion-overlay__popup-button--ghost" @click="closeAllPopups">Cancel</button>
             <button type="submit" class="motion-overlay__popup-button">Add</button>
           </div>
         </form>
       </div>
 
-      <div v-if="editingItem" class="motion-overlay__popup-backdrop" @click.self="editingItem = null">
-        <form class="motion-overlay__popup" @submit.prevent="saveEditItem">
-          <p class="motion-overlay__popup-label">Edit Item</p>
-          <input v-model="editingItem.title" type="text" maxlength="80" autofocus />
+      <div v-if="editingItem" class="motion-overlay__popup" :style="{ left: editItemPopup?.x + 'px', top: editItemPopup?.y + 'px' }" @click.stop>
+        <p class="motion-overlay__popup-label">Edit Item</p>
+        <p class="motion-overlay__popup-desc">Rename this saved tab's title.</p>
+        <form @submit.prevent="saveEditItem">
+          <input v-model="editingItem.title" type="text" maxlength="80" autofocus @keydown.esc.prevent="editingItem = null; editItemPopup = null" />
           <div class="motion-overlay__popup-actions">
-            <button
-              type="button"
-              class="motion-overlay__popup-button motion-overlay__popup-button--ghost"
-              @click="editingItem = null"
-            >
-              Cancel
-            </button>
+            <button type="button" class="motion-overlay__popup-button motion-overlay__popup-button--ghost" @click="editingItem = null; editItemPopup = null">Cancel</button>
             <button type="submit" class="motion-overlay__popup-button">Save</button>
           </div>
         </form>
       </div>
 
-      <div v-if="editingGroup" class="motion-overlay__popup-backdrop" @click.self="editingGroup = null">
-        <form class="motion-overlay__popup" @submit.prevent="saveEditGroup">
-          <p class="motion-overlay__popup-label">Edit Group</p>
-          <input v-model="editingGroup.name" type="text" maxlength="40" autofocus />
+      <div v-if="editingGroup" class="motion-overlay__popup" :style="{ left: editGroupPopup?.x + 'px', top: editGroupPopup?.y + 'px' }" @click.stop>
+        <p class="motion-overlay__popup-label">Edit Group</p>
+        <p class="motion-overlay__popup-desc">Rename this group.</p>
+        <form @submit.prevent="saveEditGroup">
+          <input v-model="editingGroup.name" type="text" maxlength="40" autofocus @keydown.esc.prevent="editingGroup = null; editGroupPopup = null" />
           <div class="motion-overlay__popup-actions">
-            <button
-              type="button"
-              class="motion-overlay__popup-button motion-overlay__popup-button--ghost"
-              @click="editingGroup = null"
-            >
-              Cancel
-            </button>
+            <button type="button" class="motion-overlay__popup-button motion-overlay__popup-button--ghost" @click="editingGroup = null; editGroupPopup = null">Cancel</button>
             <button type="submit" class="motion-overlay__popup-button">Save</button>
           </div>
         </form>
       </div>
 
-      <div v-if="isNewQuickLinkOpen" class="motion-overlay__popup-backdrop" @click.self="closeAddQuickLink">
-        <form class="motion-overlay__popup" @submit.prevent="addQuickLink">
-          <p class="motion-overlay__popup-label">Add Quick Link</p>
-          <input
-            id="motion-fss-quicklink-url"
-            v-model="newQuickLinkUrl"
-            type="text"
-            placeholder="URL"
-            maxlength="500"
-            @keydown.esc.prevent="closeAddQuickLink"
-          />
+      <div v-if="isNewQuickLinkOpen" class="motion-overlay__popup" :style="{ left: newQuickLinkPopup?.x + 'px', top: newQuickLinkPopup?.y + 'px' }" @click.stop>
+        <p class="motion-overlay__popup-label">Add Quick Link</p>
+        <p class="motion-overlay__popup-desc">Paste a URL to add a quick link. The site name is derived automatically.</p>
+        <form @submit.prevent="addQuickLink">
+          <input ref="newQuickLinkInput" v-model="newQuickLinkUrl" type="text" placeholder="URL" maxlength="500" autofocus @keydown.esc.prevent="closeAllPopups" />
           <div class="motion-overlay__popup-actions">
-            <button
-              type="button"
-              class="motion-overlay__popup-button motion-overlay__popup-button--ghost"
-              @click="closeAddQuickLink"
-            >
-              Cancel
-            </button>
+            <button type="button" class="motion-overlay__popup-button motion-overlay__popup-button--ghost" @click="closeAllPopups">Cancel</button>
             <button type="submit" class="motion-overlay__popup-button">Add</button>
           </div>
         </form>
