@@ -2,6 +2,7 @@ const ACTIVATE_TAB_MESSAGE = 'motion-fss:activate-tab';
 const CLOSE_TAB_MESSAGE = 'motion-fss:close-tab';
 const CLOSE_OVERLAY_MESSAGE = 'motion-fss:close-overlay';
 const GET_OPEN_TABS_MESSAGE = 'motion-fss:get-open-tabs';
+const OPEN_GROUP_TABS_MESSAGE = 'motion-fss:open-group-tabs';
 const OPEN_NEW_TAB_MESSAGE = 'motion-fss:open-new-tab';
 const OPEN_URL_MESSAGE = 'motion-fss:open-url';
 const TOGGLE_OVERLAY_MESSAGE = 'motion-fss:toggle-overlay';
@@ -109,4 +110,83 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       void chrome.runtime.lastError;
     });
   }
+
+  if (message?.type === 'motion-fss:open-shortcuts-page') {
+    chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+    return;
+  }
+
+  if (message?.type === 'motion-fss:toggle-fullscreen') {
+    void chrome.windows.getCurrent().then((win) => {
+      if (win.state === 'fullscreen') {
+        chrome.windows.update(win.id!, { state: 'normal' });
+      } else {
+        chrome.windows.update(win.id!, { state: 'fullscreen' });
+      }
+    });
+    return;
+  }
+
+  if (message?.type === OPEN_GROUP_TABS_MESSAGE && Array.isArray(message.urls) && message.urls.length) {
+    const urls = message.urls as string[];
+    const newWindow = Boolean(message.newWindow);
+    if (newWindow) {
+      chrome.windows.create({ url: urls, focused: true }, () => {
+        void chrome.runtime.lastError;
+      });
+    } else {
+      // Check if any of the URLs are already open in the current window
+      chrome.tabs.query({ currentWindow: true }, (existingTabs) => {
+        const existingUrls = new Set(existingTabs.map((t) => t.url?.replace(/\/$/, '')));
+        const toOpen: string[] = [];
+        for (const url of urls) {
+          if (!existingUrls.has(url.replace(/\/$/, ''))) {
+            toOpen.push(url);
+          }
+        }
+        if (toOpen.length) {
+          // Open remaining tabs
+          for (const url of toOpen) {
+            chrome.tabs.create({ url, active: false }, () => {
+              void chrome.runtime.lastError;
+            });
+          }
+        }
+      });
+    }
+    return;
+  }
+
+  if (message?.type === 'motion-fss:toggle-maximize') {
+    void chrome.windows.getCurrent().then((win) => {
+      if (win.state === 'maximized') {
+        chrome.windows.update(win.id!, { state: 'normal' });
+      } else {
+        chrome.windows.update(win.id!, { state: 'maximized' });
+      }
+    });
+    return;
+  }
+
+  if (message?.type === 'motion-fss:check-fullscreen') {
+    chrome.windows.getCurrent().then((win) => {
+      sendResponse({ fullscreen: win.state === 'fullscreen' });
+    }).catch(() => sendResponse({ fullscreen: false }));
+    return true;
+  }
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.local.get('motion-fss:settings')
+    .then((stored) => {
+      const settings = stored['motion-fss:settings'] as Record<string, unknown> | undefined;
+      if (settings?.toggleFullscreenOnOpen) {
+        void chrome.windows.getCurrent().then((win) => {
+          if (win.state !== 'fullscreen') {
+            chrome.windows.update(win.id!, { state: 'fullscreen' });
+          }
+        });
+      }
+    })
+    .catch(() => {});
 });

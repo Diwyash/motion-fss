@@ -3,9 +3,6 @@
   "name": "Motion FSS",
   "description": "Open a custom Vue overlay in the active tab.",
   "version": "0.1.0",
-  "action": {
-    "default_title": "Motion FSS"
-  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

@@ -9,9 +9,11 @@ const OPEN_NEW_TAB_MESSAGE = 'motion-fss:open-new-tab';
 const OPEN_URL_MESSAGE = 'motion-fss:open-url';
 const GO_BACK_MESSAGE = 'motion-fss:go-back';
 const GO_FORWARD_MESSAGE = 'motion-fss:go-forward';
+const TOGGLE_FULLSCREEN_MESSAGE = 'motion-fss:toggle-fullscreen';
 const GROUPS_STORAGE_KEY = 'motion-fss:groups';
 const QUICK_LINKS_STORAGE_KEY = 'motion-fss:quick-links';
 const ACTIVE_GROUP_STORAGE_KEY = 'motion-fss:active-group';
+const SETTINGS_STORAGE_KEY = 'motion-fss:settings';
 const MAX_QUICK_LINKS = 9;
 
 type QuickLink = {
@@ -65,9 +67,10 @@ type SearchSuggestion = {
   title: string;
   url: string;
   favIconUrl: string | null;
-  source: 'tab' | 'group';
+  source: 'tab' | 'group' | 'action';
   tabId?: number;
   score: number;
+  description?: string;
 };
 
 const props = defineProps<{
@@ -104,20 +107,144 @@ const editItemPopup = ref<{ x: number; y: number } | null>(null);
 const editingGroup = ref<{ groupId: string; name: string } | null>(null);
 const editGroupPopup = ref<{ x: number; y: number } | null>(null);
 const showSettings = ref(false);
+const settingsActiveSection = ref('overlay');
+const showFooter = ref(true);
+const showQuickLinks = ref(true);
+const toggleFullscreenOnOpen = ref(false);
+const showBadge = ref(true);
+const openGroupTabsInNewWindow = ref(false);
 const quickLinks = ref<QuickLink[]>([]);
+const currentUrl = ref('');
 const searchInput = ref<HTMLInputElement | null>(null);
 const isNewQuickLinkOpen = ref(false);
 const newQuickLinkPopup = ref<{ x: number; y: number } | null>(null);
 const newQuickLinkUrl = ref('');
 const newQuickLinkInput = ref<HTMLInputElement | null>(null);
 const searchQuery = ref('');
+const searchFlash = ref<string | null>(null);
+let searchFlashTimer: ReturnType<typeof setTimeout> | null = null;
+const searchBadge = ref<string | null>(null);
+
+function clearSearchBadge() {
+  searchBadge.value = null;
+  searchQuery.value = '';
+  searchSelectedIndex.value = -1;
+  searchInput.value?.focus();
+}
+
+function setSearchFlash(message: string) {
+  searchFlash.value = message;
+  if (searchFlashTimer) clearTimeout(searchFlashTimer);
+  searchFlashTimer = setTimeout(() => {
+    searchFlash.value = null;
+  }, 1200);
+  searchQuery.value = '';
+  searchSelectedIndex.value = -1;
+}
+
 const searchSuggestions = computed((): SearchSuggestion[] => {
   const q = searchQuery.value.trim().toLowerCase();
+  const results: SearchSuggestion[] = [];
+
+  // When a badge is active, show only its related actions (no tabs/groups)
+  if (searchBadge.value === 'settings') {
+    const settingsActions: { id: string; title: string; description: string; section: string }[] = [
+      { id: '__settings_footer__', title: showFooter.value ? 'Hide footer' : 'Show footer', description: showFooter.value ? 'Footer is currently visible' : 'Footer is currently hidden', section: 'overlay' },
+      { id: '__settings_quicklinks__', title: showQuickLinks.value ? 'Hide quick links' : 'Show quick links', description: showQuickLinks.value ? 'Quick links row is currently visible' : 'Quick links row is currently hidden', section: 'overlay' },
+      { id: '__settings_badge__', title: showBadge.value ? 'Hide loading badge' : 'Show loading badge', description: showBadge.value ? 'Loading badge is currently shown' : 'Loading badge is currently hidden', section: 'overlay' },
+      { id: '__settings_fullscreen__', title: toggleFullscreenOnOpen.value ? 'Disable fullscreen on startup' : 'Enable fullscreen on startup', description: toggleFullscreenOnOpen.value ? 'Will enter fullscreen when browser starts' : 'Will not enter fullscreen when browser starts', section: 'overlay' },
+      { id: '__settings_shortcuts__', title: 'Shortcuts', description: 'View keyboard shortcuts', section: 'shortcuts' },
+      { id: '__settings_about__', title: 'About', description: 'Version info', section: 'about' },
+    ];
+
+    for (const action of settingsActions) {
+      const matchTitle = action.title.toLowerCase().includes(q);
+      const matchDesc = action.description.toLowerCase().includes(q);
+      if (!q || matchTitle || matchDesc) {
+        let score = 0;
+        if (action.title.toLowerCase() === q) score = 400;
+        else if (action.title.toLowerCase().startsWith(q)) score = 350;
+        else score = 300;
+        results.push({
+          id: action.id,
+          title: action.title,
+          url: '',
+          favIconUrl: null,
+          source: 'action',
+          score,
+          description: action.description
+        });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 8);
+  }
+
+  // When group badge is active, search group names
+  if (searchBadge.value === 'groups') {
+    for (const group of groups.value) {
+      const name = group.name.toLowerCase();
+      if (!q || name.includes(q)) {
+        let score = 0;
+        if (name === q) score = 400;
+        else if (name.startsWith(q)) score = 350;
+        else score = 300;
+        results.push({
+          id: group.id,
+          title: group.name,
+          url: '',
+          favIconUrl: null,
+          source: 'action',
+          score,
+          description: `${group.tabs.length} tab${group.tabs.length !== 1 ? 's' : ''}`,
+        });
+      }
+    }
+    if (results.length === 0 && q) {
+      results.push({
+        id: '__no_groups__',
+        title: 'No matching groups',
+        url: '',
+        favIconUrl: null,
+        source: 'action',
+        score: -1,
+        description: 'Create a group first'
+      });
+    }
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 8);
+  }
+
+  // ── Normal mode (no badge) ──────────────────────────────────────
   if (!q) return [];
 
-  const results: SearchSuggestion[] = [];
   const seen = new Set<string>();
 
+  // Search open tabs
+  for (const tab of localTabs.value) {
+    const title = (tab.title ?? '').toLowerCase();
+    const url = (tab.url ?? '').toLowerCase();
+    const normUrl = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const key = normUrl || title;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const titleMatch = title.includes(q);
+    const urlMatch = url.includes(q);
+    if (!titleMatch && !urlMatch) continue;
+
+    let score = 0;
+    if (title === q) score = 100;
+    else if (title.startsWith(q)) score = 80;
+    else if (titleMatch) score = 60;
+    else if (url.startsWith(q)) score = 40;
+    else if (urlMatch) score = 20;
+
+    results.push({ id: String(tab.id), title: tab.title, url: tab.url, favIconUrl: tab.favIconUrl, source: 'tab', tabId: tab.id, score });
+  }
+
+  // Search group tabs
   for (const group of groups.value) {
     for (const tab of group.tabs) {
       const title = (tab.title ?? '').toLowerCase();
@@ -142,12 +269,76 @@ const searchSuggestions = computed((): SearchSuggestion[] => {
     }
   }
 
+  // Command mode: when query starts with "/", show individual settings / actions
+  if (q.startsWith('/')) {
+    const cmd = q.slice(1).toLowerCase();
+    const settingsActions: { id: string; title: string; description: string; section: string }[] = [
+      { id: '__settings__', title: 'Settings', description: 'Open settings page', section: '' },
+      { id: '__settings_footer__', title: showFooter.value ? 'Hide footer' : 'Show footer', description: showFooter.value ? 'Footer is currently visible' : 'Footer is currently hidden', section: 'overlay' },
+      { id: '__settings_quicklinks__', title: showQuickLinks.value ? 'Hide quick links' : 'Show quick links', description: showQuickLinks.value ? 'Quick links row is currently visible' : 'Quick links row is currently hidden', section: 'overlay' },
+      { id: '__settings_badge__', title: showBadge.value ? 'Hide loading badge' : 'Show loading badge', description: showBadge.value ? 'Loading badge is currently shown' : 'Loading badge is currently hidden', section: 'overlay' },
+      { id: '__settings_fullscreen__', title: toggleFullscreenOnOpen.value ? 'Disable fullscreen on startup' : 'Enable fullscreen on startup', description: toggleFullscreenOnOpen.value ? 'Will enter fullscreen when browser starts' : 'Will not enter fullscreen when browser starts', section: 'overlay' },
+      { id: '__settings_shortcuts__', title: 'Shortcuts', description: 'View keyboard shortcuts', section: 'shortcuts' },
+      { id: '__settings_about__', title: 'About', description: 'Version info', section: 'about' },
+    ];
+
+    for (const action of settingsActions) {
+      const matchTitle = action.title.toLowerCase().includes(cmd);
+      const matchDesc = action.description.toLowerCase().includes(cmd);
+      if (!cmd || matchTitle || matchDesc) {
+        let score = 300;
+        if (action.title.toLowerCase() === cmd) score = 500;
+        else if (action.title.toLowerCase().startsWith(cmd)) score = 400;
+        results.push({
+          id: action.id,
+          title: action.title,
+          url: '',
+          favIconUrl: null,
+          source: 'action',
+          score,
+          description: action.description
+        });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 8);
+  }
+
+  // Show "Settings" entry when query matches — always last, score below all tabs
+  if (q === 'settings' || 'settings'.startsWith(q)) {
+    results.push({
+      id: '__settings__',
+      title: 'Settings',
+      url: '',
+      favIconUrl: null,
+      source: 'action',
+      score: -1,
+      description: 'Open settings page'
+    });
+  }
+
+  // Show "Groups" entry when query matches
+  if (groups.value.length && (q === 'groups' || q === 'group' || 'groups'.startsWith(q))) {
+    results.push({
+      id: '__groups__',
+      title: 'Groups',
+      url: '',
+      favIconUrl: null,
+      source: 'action',
+      score: -2,
+      description: `Search ${groups.value.length} group${groups.value.length !== 1 ? 's' : ''}`
+    });
+  }
+
+  // Sort descending, but settings (-1) will sink to the bottom
   results.sort((a, b) => b.score - a.score);
   return results.slice(0, 8);
 });
 const searchSelectedIndex = ref(-1);
 const isSearchFocused = ref(false);
-const isSearchActive = computed(() => searchQuery.value.length > 0 && isSearchFocused.value);
+const isSearchActive = computed(() => (searchQuery.value.length > 0 || searchBadge.value !== null) && isSearchFocused.value);
+const hasQuickLinks = computed(() => showQuickLinks.value && (quickLinks.value.length || quickLinks.value.length < MAX_QUICK_LINKS));
 const dragTabId = ref<number | null>(null);
 const dragOverGroupId = ref<string | null>(null);
 const dragGroupId = ref<string | null>(null);
@@ -155,10 +346,15 @@ const dragOverGroupIndex = ref<string | null>(null);
 const draggingGroupItem = ref<GroupDragState>(null);
 const dragOverGroupItem = ref<GroupDragState>(null);
 
-function toggleGroupMenu(groupId: string, event: MouseEvent) {
+function toggleGroupMenu(groupId: string, event?: MouseEvent) {
   closeAllPopups();
-  activeGroupMenu.value = activeGroupMenu.value?.groupId === groupId ? null : { groupId, x: event.clientX, y: event.clientY };
-  event.stopPropagation();
+  if (event) {
+    activeGroupMenu.value = activeGroupMenu.value?.groupId === groupId ? null : { groupId, x: event.clientX, y: event.clientY };
+    event.stopPropagation();
+  } else {
+    // Toggle without positioning — menu will be positioned via CSS relative to the group head
+    activeGroupMenu.value = activeGroupMenu.value?.groupId === groupId ? null : { groupId, x: 0, y: 0 };
+  }
 }
 
 function deleteGroup(groupId: string) {
@@ -169,13 +365,15 @@ function deleteGroup(groupId: string) {
   }
 }
 
+const OPEN_GROUP_TABS_MESSAGE = 'motion-fss:open-group-tabs';
+
 function openAllGroupTabs(groupId: string) {
   const group = groups.value.find((entry) => entry.id === groupId);
   if (!group) return;
-  for (const tab of group.tabs) {
-    sendMessage(OPEN_URL_MESSAGE, { url: tab.url });
-  }
+  const urls = group.tabs.map((t) => t.url);
+  sendMessage(OPEN_GROUP_TABS_MESSAGE, { urls, newWindow: openGroupTabsInNewWindow.value });
   activeGroupMenu.value = null;
+  props.onClose();
 }
 
 function startEditGroup(groupId: string, name: string, event: MouseEvent) {
@@ -193,6 +391,88 @@ function saveEditGroup() {
     groups.value = [...groups.value];
   }
   editingGroup.value = null;
+}
+
+function getFavIconUrl(url: string): string {
+  try {
+    const origin = new URL(url).origin;
+    return `https://www.google.com/s2/favicons?domain=${origin}&sz=32`;
+  } catch {
+    return '';
+  }
+}
+
+function openAddQuickLink(event: MouseEvent) {
+  closeAllPopups();
+  isNewQuickLinkOpen.value = true;
+  newQuickLinkUrl.value = '';
+  newQuickLinkPopup.value = { x: event.clientX, y: event.clientY };
+  event.stopPropagation();
+  void nextTick(() => {
+    newQuickLinkInput.value?.focus();
+  });
+}
+
+function closeAddQuickLink() {
+  isNewQuickLinkOpen.value = false;
+  newQuickLinkUrl.value = '';
+}
+
+function addQuickLink() {
+  let url = newQuickLinkUrl.value.trim();
+  if (!url) return;
+
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+
+  let name: string;
+  try {
+    name = new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return;
+  }
+
+  quickLinks.value = [
+    ...quickLinks.value,
+    {
+      id: createId('ql'),
+      name,
+      url,
+      favIconUrl: getFavIconUrl(url)
+    }
+  ];
+
+  closeAddQuickLink();
+}
+
+function openQuickLink(index: number) {
+  const link = quickLinks.value[index];
+  if (!link) return;
+
+  const existingTab = localTabs.value.find(
+    (tab) => tab.url === link.url || tab.url.replace(/\/$/, '') === link.url.replace(/\/$/, '')
+  );
+  if (existingTab?.id) {
+    sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: existingTab.id });
+  } else {
+    sendMessage(OPEN_URL_MESSAGE, { url: link.url });
+  }
+  props.onClose();
+}
+
+const activeQuickLinkMenu = ref<string | null>(null);
+
+function toggleQuickLinkMenu(id: string) {
+  closeAllPopups();
+  activeQuickLinkMenu.value = activeQuickLinkMenu.value === id ? null : id;
+}
+
+function removeQuickLink(id: string) {
+  quickLinks.value = quickLinks.value.filter((entry) => entry.id !== id);
+  if (activeQuickLinkMenu.value === id) {
+    activeQuickLinkMenu.value = null;
+  }
 }
 
 function createId(prefix: string) {
@@ -237,17 +517,64 @@ function sendMessage(type: string, payload: Record<string, unknown> = {}) {
   });
 }
 
+function openTab(tab: OpenTab) {
+  sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: tab.id });
+  props.onClose();
+}
+
 function activateSelectedTab() {
   const tab = selectedTab.value;
   if (!tab) {
     return;
   }
 
-  sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: tab.id });
-  props.onClose();
+  openTab(tab);
 }
 
 function openSuggestion(suggestion: SearchSuggestion) {
+  if (suggestion.source === 'action') {
+    // Toggle the setting directly and show flash feedback
+    if (suggestion.id === '__settings__') {
+      // Convert to badge mode on Enter
+      searchBadge.value = 'settings';
+      searchQuery.value = '';
+      searchSelectedIndex.value = -1;
+      searchInput.value?.focus();
+    } else if (suggestion.id === '__settings_shortcuts__') {
+      showSettings.value = true;
+      settingsActiveSection.value = 'shortcuts';
+      searchQuery.value = '';
+      searchSelectedIndex.value = -1;
+      searchInput.value?.blur();
+    } else if (suggestion.id === '__settings_about__') {
+      showSettings.value = true;
+      settingsActiveSection.value = 'about';
+      searchQuery.value = '';
+      searchSelectedIndex.value = -1;
+      searchInput.value?.blur();
+    } else if (suggestion.id === '__groups__') {
+      // Convert to group badge mode
+      searchBadge.value = 'groups';
+      searchQuery.value = '';
+      searchSelectedIndex.value = -1;
+      searchInput.value?.focus();
+    } else if (searchBadge.value === 'groups') {
+      // Opening a specific group — open all its tabs
+      const group = groups.value.find((g) => g.id === suggestion.id);
+      if (group) {
+        openAllGroupTabs(group.id);
+        props.onClose();
+        return;
+      }
+    } else {
+      if (suggestion.id === '__settings_footer__') showFooter.value = !showFooter.value;
+      else if (suggestion.id === '__settings_quicklinks__') showQuickLinks.value = !showQuickLinks.value;
+      else if (suggestion.id === '__settings_badge__') showBadge.value = !showBadge.value;
+      else if (suggestion.id === '__settings_fullscreen__') toggleFullscreenOnOpen.value = !toggleFullscreenOnOpen.value;
+      setSearchFlash(suggestion.title);
+    }
+    return;
+  }
   if (suggestion.source === 'tab' && suggestion.tabId) {
     sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: suggestion.tabId });
   } else {
@@ -262,12 +589,11 @@ function openSuggestion(suggestion: SearchSuggestion) {
 }
 
 function closeTab(tab: OpenTab) {
-  localTabs.value = localTabs.value.filter((t) => t.id !== tab.id);
   chrome.runtime.sendMessage(
     { type: CLOSE_TAB_MESSAGE, tabId: tab.id },
     () => {
       void chrome.runtime.lastError;
-      setTimeout(() => fetchOpenTabs(), 100);
+      fetchOpenTabs();
     }
   );
 }
@@ -275,6 +601,22 @@ function closeTab(tab: OpenTab) {
 function openNewTab() {
   sendMessage(OPEN_NEW_TAB_MESSAGE);
   props.onClose();
+}
+
+function copyUrl() {
+  const url = currentUrl.value;
+  if (!url) return;
+  navigator.clipboard.writeText(url).catch(() => {});
+}
+
+function toggleFullscreen() {
+  sendMessage(TOGGLE_FULLSCREEN_MESSAGE);
+}
+
+function openExtensionShortcuts() {
+  chrome.runtime.sendMessage({ type: 'motion-fss:open-shortcuts-page' }, () => {
+    void chrome.runtime.lastError;
+  });
 }
 
 function openNewGroup(event: MouseEvent) {
@@ -319,12 +661,6 @@ function toggleGroup(groupId: string) {
   }
 
   group.collapsed = !group.collapsed;
-}
-
-function findGroupTab(groupId: string, tabId: string) {
-  const group = groups.value.find((entry) => entry.id === groupId);
-  const tabIndex = group?.tabs.findIndex((entry) => entry.id === tabId) ?? -1;
-  return { group, tabIndex };
 }
 
 function insertGroupTab(group: GroupRecord, tab: GroupTabRecord, index = group.tabs.length) {
@@ -397,14 +733,6 @@ function removeTabFromGroup(groupId: string, tabId: string) {
   groups.value = [...groups.value];
 }
 
-function removeAllDuplicates(tab: GroupTabRecord) {
-  for (const group of groups.value) {
-    group.tabs = group.tabs.filter(
-      (entry) => entry.sourceTabId !== tab.sourceTabId && entry.url !== tab.url
-    );
-  }
-}
-
 function openGroupTab(tab: GroupTabRecord) {
   const openTab = localTabs.value.find((entry) => entry.id === tab.sourceTabId || entry.url === tab.url);
   if (openTab?.id) {
@@ -464,87 +792,6 @@ function deleteItem() {
 
   removeTabFromGroup(activeItemMenu.value.groupId, activeItemMenu.value.tabId);
   activeItemMenu.value = null;
-}
-
-function getFavIconUrl(url: string) {
-  try {
-    const origin = new URL(url).origin;
-    return `https://www.google.com/s2/favicons?domain=${origin}&sz=32`;
-  } catch {
-    return '';
-  }
-}
-
-function openAddQuickLink(event: MouseEvent) {
-  closeAllPopups();
-  isNewQuickLinkOpen.value = true;
-  newQuickLinkUrl.value = '';
-  newQuickLinkPopup.value = { x: event.clientX, y: event.clientY };
-  event.stopPropagation();
-  void nextTick(() => {
-    newQuickLinkInput.value?.focus();
-  });
-}
-
-function closeAddQuickLink() {
-  isNewQuickLinkOpen.value = false;
-  newQuickLinkUrl.value = '';
-}
-
-function addQuickLink() {
-  let url = newQuickLinkUrl.value.trim();
-  if (!url) return;
-
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = `https://${url}`;
-  }
-
-  let name: string;
-  try {
-    name = new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return;
-  }
-
-  quickLinks.value = [
-    ...quickLinks.value,
-    {
-      id: createId('ql'),
-      name,
-      url,
-      favIconUrl: getFavIconUrl(url)
-    }
-  ];
-
-  closeAddQuickLink();
-}
-
-function openQuickLink(index: number) {
-  const link = quickLinks.value[index];
-  if (!link) return;
-
-  const existingTab = localTabs.value.find(
-    (tab) => tab.url === link.url || tab.url.replace(/\/$/, '') === link.url.replace(/\/$/, '')
-  );
-  if (existingTab?.id) {
-    sendMessage(ACTIVATE_TAB_MESSAGE, { tabId: existingTab.id });
-  } else {
-    sendMessage(OPEN_URL_MESSAGE, { url: link.url });
-  }
-  props.onClose();
-}
-
-const activeQuickLinkMenu = ref<string | null>(null);
-
-function toggleQuickLinkMenu(id: string) {
-  activeQuickLinkMenu.value = activeQuickLinkMenu.value === id ? null : id;
-}
-
-function removeQuickLink(id: string) {
-  quickLinks.value = quickLinks.value.filter((entry) => entry.id !== id);
-  if (activeQuickLinkMenu.value === id) {
-    activeQuickLinkMenu.value = null;
-  }
 }
 
 function onTabDragStart(tabId: number, event: DragEvent) {
@@ -750,15 +997,17 @@ function onSidebarListDrop(event: DragEvent) {
   const data = event.dataTransfer?.getData('text/plain');
   if (!data || !groups.value.length) return;
 
+  let sourceTabId: number | null = null;
+
   try {
     const parsed = JSON.parse(data);
-    if (parsed.groupDrag) return;
+    if (parsed && typeof parsed === 'object' && parsed.groupDrag) return;
+    sourceTabId = typeof parsed === 'number' ? parsed : Number(data);
   } catch {
-    // plain text = tab ID from tab list
+    sourceTabId = Number(data);
   }
 
-  const sourceTabId = Number(data);
-  if (Number.isFinite(sourceTabId)) {
+  if (sourceTabId !== null && Number.isFinite(sourceTabId)) {
     addTabToGroup(groups.value[0].id, sourceTabId);
   }
 
@@ -809,6 +1058,16 @@ function closeAllPopups() {
   if (isNewQuickLinkOpen.value) { isNewQuickLinkOpen.value = false; newQuickLinkUrl.value = ''; }
 }
 
+function onSearchBlur() {
+  isSearchFocused.value = false;
+  setTimeout(() => {
+    if (!searchBadge.value) {
+      searchQuery.value = '';
+    }
+    searchSelectedIndex.value = -1;
+  }, 120);
+}
+
 function onShellClick(event: MouseEvent) {
   const target = event.target as HTMLElement;
   if (target.closest('.motion-overlay__popup, .motion-overlay__group-menu, .motion-overlay__group-tab-menu, .motion-overlay__ql-menu, .motion-overlay__search-suggestions')) {
@@ -820,28 +1079,46 @@ function onShellClick(event: MouseEvent) {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && isNewQuickLinkOpen.value) {
-    event.preventDefault();
-    closeAddQuickLink();
-    return;
+  // If search isn't focused and user types a printable character, focus search and type it
+  if (!isSearchFocused.value && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (!isNewGroupOpen.value && !isNewQuickLinkOpen.value && !editingItem.value && !editingGroup.value) {
+      searchInput.value?.focus();
+      searchQuery.value += event.key;
+      event.preventDefault();
+      return;
+    }
   }
 
-  if (isNewGroupOpen.value && event.key === 'Escape') {
-    event.preventDefault();
-    closeNewGroup();
+  // Remove search badge on Backspace when query is empty
+  if (searchBadge.value && event.key === 'Backspace' && !searchQuery.value) {
+    searchBadge.value = null;
     return;
   }
 
   const isPopupOpen = isNewGroupOpen.value || isNewQuickLinkOpen.value || editingItem.value || editingGroup.value;
 
+  if (event.key === 'Escape' && isPopupOpen) {
+    event.preventDefault();
+    closeAllPopups();
+    return;
+  }
+
   if (event.key === 'Tab') {
     if (isPopupOpen) return;
-    if (isSearchFocused.value && searchSuggestions.value.length) {
-      event.preventDefault();
+    event.preventDefault();
+
+    // If only "Settings" or "Groups" is in the suggestions (no tabs/groups), jump to badge mode
+    const q = searchQuery.value.trim().toLowerCase();
+    if (!searchBadge.value && !event.shiftKey && q && isSearchActive.value &&
+        searchSuggestions.value.length === 1 &&
+        (searchSuggestions.value[0].id === '__settings__' || searchSuggestions.value[0].id === '__groups__')) {
+      openSuggestion(searchSuggestions.value[0]);
+      return;
+    }
+
+    if (isSearchActive.value && searchSuggestions.value.length) {
       const delta = event.shiftKey ? -1 : 1;
-      const next = (searchSelectedIndex.value + delta + searchSuggestions.value.length) % searchSuggestions.value.length;
-      searchSelectedIndex.value = next;
-      // Scroll the selected suggestion into view
+      searchSelectedIndex.value = (searchSelectedIndex.value + delta + searchSuggestions.value.length) % searchSuggestions.value.length;
       void nextTick(() => {
         const host = searchInput.value?.closest('.motion-overlay') as HTMLElement | null;
         if (!host) return;
@@ -849,7 +1126,6 @@ function onKeydown(event: KeyboardEvent) {
         suggestion?.scrollIntoView?.({ block: 'nearest' });
       });
     } else {
-      event.preventDefault();
       moveSelection(event.shiftKey ? -1 : 1);
     }
     return;
@@ -889,8 +1165,9 @@ function onKeydown(event: KeyboardEvent) {
     return;
   }
 
-  if (event.key >= '1' && event.key <= '9') {
+  if (event.key >= '1' && event.key <= '9' && showQuickLinks.value) {
     if (isPopupOpen) return;
+    if (isNewGroupOpen.value || isNewQuickLinkOpen.value || editingItem.value || editingGroup.value) return;
     const index = parseInt(event.key) - 1;
     if (index < quickLinks.value.length) {
       event.preventDefault();
@@ -899,10 +1176,17 @@ function onKeydown(event: KeyboardEvent) {
     return;
   }
 
-  if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && isSearchFocused.value && searchSuggestions.value.length) {
+  if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && isSearchActive.value && searchSuggestions.value.length) {
     event.preventDefault();
     const delta = event.key === 'ArrowDown' ? 1 : -1;
-    searchSelectedIndex.value = Math.min(Math.max(searchSelectedIndex.value + delta, 0), searchSuggestions.value.length - 1);
+    searchSelectedIndex.value = (searchSelectedIndex.value + delta + searchSuggestions.value.length) % searchSuggestions.value.length;
+    // Scroll the selected suggestion into view
+    void nextTick(() => {
+      const host = searchInput.value?.closest('.motion-overlay') as HTMLElement | null;
+      if (!host) return;
+      const suggestion = host.querySelector('.motion-overlay__search-suggestion--selected') as HTMLElement | null;
+      suggestion?.scrollIntoView?.({ block: 'nearest' });
+    });
     return;
   }
 
@@ -912,7 +1196,20 @@ function onKeydown(event: KeyboardEvent) {
     return;
   }
 
+  if (event.key === 'f' && event.altKey) {
+    event.preventDefault();
+    toggleFullscreen();
+    return;
+  }
+
   if (event.key === 'Escape') {
+    if (searchBadge.value) {
+      searchBadge.value = null;
+      searchQuery.value = '';
+      searchSelectedIndex.value = -1;
+      searchInput.value?.focus();
+      return;
+    }
     if (searchQuery.value) {
       searchQuery.value = '';
       searchSelectedIndex.value = -1;
@@ -920,7 +1217,11 @@ function onKeydown(event: KeyboardEvent) {
       return;
     }
     event.preventDefault();
-    closeAllPopups();
+    if (activeItemMenu.value || activeGroupMenu.value || editingItem.value || editingGroup.value || isNewGroupOpen.value || isNewQuickLinkOpen.value || activeQuickLinkMenu.value) {
+      closeAllPopups();
+    } else {
+      props.onClose();
+    }
   }
 }
 
@@ -952,15 +1253,39 @@ async function hydrateQuickLinks() {
   }
 }
 
-function persistGroups() {
-  if (!hydrated.value) {
-    return;
+async function hydrateSettings() {
+  try {
+    const stored = await chrome.storage.local.get(SETTINGS_STORAGE_KEY);
+    const saved = stored[SETTINGS_STORAGE_KEY] as Record<string, unknown> | undefined;
+    if (saved) {
+      if (typeof saved.showFooter === 'boolean') showFooter.value = saved.showFooter;
+      if (typeof saved.showQuickLinks === 'boolean') showQuickLinks.value = saved.showQuickLinks;
+      if (typeof saved.toggleFullscreenOnOpen === 'boolean') toggleFullscreenOnOpen.value = saved.toggleFullscreenOnOpen;
+      if (typeof saved.openGroupTabsInNewWindow === 'boolean') openGroupTabsInNewWindow.value = saved.openGroupTabsInNewWindow;
+      if (typeof saved.showBadge === 'boolean') showBadge.value = saved.showBadge;
+    }
+  } catch {
+    // defaults apply
   }
-
-  chrome.storage.local.set({
-    [GROUPS_STORAGE_KEY]: cloneGroups(groups.value)
-  });
 }
+
+function persistSettings() {
+  chrome.storage.local.set({
+    [SETTINGS_STORAGE_KEY]: {
+      showFooter: showFooter.value,
+      showQuickLinks: showQuickLinks.value,
+      toggleFullscreenOnOpen: toggleFullscreenOnOpen.value,
+      openGroupTabsInNewWindow: openGroupTabsInNewWindow.value,
+      showBadge: showBadge.value
+    }
+  }).catch(() => {});
+}
+
+watch(
+  () => [showFooter.value, showQuickLinks.value, toggleFullscreenOnOpen.value, openGroupTabsInNewWindow.value, showBadge.value],
+  () => persistSettings(),
+  { deep: true }
+);
 
 watch(
   () => props.selectedTabId,
@@ -998,8 +1323,13 @@ watch(
 onMounted(() => {
   void hydrateGroups();
   void hydrateQuickLinks();
+  void hydrateSettings();
   void nextTick(() => {
-    searchInput.value?.focus();
+    // Grab the current tab's URL from the fetched open tabs
+    const activeTab = localTabs.value.find((t) => t.active);
+    if (activeTab?.url) {
+      currentUrl.value = activeTab.url;
+    }
   });
   window.addEventListener('keydown', onKeydown, true);
 });
@@ -1027,7 +1357,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="motion-overlay" :class="{ 'motion-overlay--searching': isSearchActive }" role="dialog" aria-modal="true" aria-label="Open tabs overlay" @click.self="closeAllPopups">
-    <div class="motion-overlay__shell" :class="{ 'motion-overlay--searching': isSearchActive }" @click="onShellClick">
+    <div class="motion-overlay__shell" :class="{ 'motion-overlay--searching': isSearchActive }" @click.self="closeAllPopups">
       <aside class="motion-overlay__rail">
         <div class="motion-overlay__rail-header">
           <div class="motion-overlay__title-wrap">
@@ -1088,14 +1418,10 @@ onBeforeUnmount(() => {
 
               <span
                 class="motion-overlay__tab-close"
-                role="button"
                 :aria-label="`Close ${getTabFallbackTitle(tab.title, tab.url)}`"
                 @click.stop="closeTab(tab)"
-                tabindex="0"
-                @keydown.enter.stop="closeTab(tab)"
-                @keydown.space.stop="closeTab(tab)"
               >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </span>
@@ -1103,42 +1429,56 @@ onBeforeUnmount(() => {
           </li>
         </ul>
 
-        <div class="motion-overlay__rail-footer">
+        <div class="motion-overlay__rail-footer" :class="{ 'motion-overlay__rail-footer--no-footer': !showFooter }">
           <button type="button" class="motion-overlay__footer-button" @click="openNewTab">
             <span class="motion-overlay__footer-label">New Tab</span>
           </button>
         </div>
       </aside>
 
-      <main class="motion-overlay__workspace">
+      <main class="motion-overlay__workspace" :class="{ 'motion-overlay__workspace--no-footer': !showFooter }" :style="{ gridTemplateRows: hasQuickLinks ? 'auto auto 1fr' : 'auto 1fr' }">
         <header class="motion-overlay__topbar">
           <div class="motion-overlay__search-wrap">
-            <label class="motion-overlay__search">
-              <span aria-hidden="true">
-                <svg width="800px" height="800px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M14.9536 14.9458L21 21M17 10C17 13.866 13.866 17 10 17C6.13401 17 3 13.866 3 10C3 6.13401 6.13401 3 10 3C13.866 3 17 6.13401 17 10Z" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </span>
-              <input ref="searchInput" v-model="searchQuery" type="text" placeholder="Search the web..." @focus="isSearchFocused = true" @blur="isSearchFocused = false; setTimeout(() => { searchQuery = ''; searchSelectedIndex = -1; }, 120)" />
-            </label>
-            <div v-if="isSearchFocused && searchSuggestions.length" class="motion-overlay__search-suggestions">
-              <button
-                v-for="(suggestion, sIndex) in searchSuggestions"
-                :key="suggestion.id"
-                type="button"
-                class="motion-overlay__search-suggestion"
-                :style="{ '--index': sIndex }"
-                :class="{ 'motion-overlay__search-suggestion--selected': sIndex === searchSelectedIndex }"
-                @click="openSuggestion(suggestion)"
-                @mousedown.prevent
-              >
-                <span class="motion-overlay__search-suggestion-icon" aria-hidden="true">
-                  <img v-if="suggestion.favIconUrl" :src="suggestion.favIconUrl" alt="" />
-                  <span v-else>{{ getTabFallbackTitle(suggestion.title, suggestion.url).slice(0, 1).toUpperCase() }}</span>
+            <div class="motion-overlay__search-container">
+              <label class="motion-overlay__search">
+                <span aria-hidden="true">
+                  <svg width="800px" height="800px" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M14.9536 14.9458L21 21M17 10C17 13.866 13.866 17 10 17C6.13401 17 3 13.866 3 10C3 6.13401 6.13401 3 10 3C13.866 3 17 6.13401 17 10Z" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
                 </span>
-                <span class="motion-overlay__search-suggestion-title">{{ getTabFallbackTitle(suggestion.title, suggestion.url) }}</span>
-                <span class="motion-overlay__search-suggestion-url">{{ suggestion.url }}</span>
-              </button>
+                <span v-if="searchBadge === 'settings' || searchBadge === 'groups'" class="motion-overlay__search-badge">
+                  <span>{{ searchBadge === 'groups' ? 'Groups' : 'Settings' }}</span>
+                  <button type="button" class="motion-overlay__search-badge-close" @click.stop="clearSearchBadge()" aria-label="Remove search badge">×</button>
+                </span>
+                <input ref="searchInput" v-model="searchQuery" type="text" :placeholder="searchBadge === 'groups' ? 'Search groups...' : searchBadge === 'settings' ? 'Search settings...' : 'Search the web...'" @focus="isSearchFocused = true" @blur="onSearchBlur" />
+              </label>
+              <transition name="flash-fade">
+                <div v-if="searchFlash" class="motion-overlay__search-flash">{{ searchFlash }}</div>
+              </transition>
+              <div v-if="isSearchFocused && searchSuggestions.length" class="motion-overlay__search-suggestions">
+                <button
+                  v-for="(suggestion, sIndex) in searchSuggestions"
+                  :key="suggestion.id"
+                  type="button"
+                  class="motion-overlay__search-suggestion"
+                  :style="{ '--index': sIndex }"
+                  :class="{ 'motion-overlay__search-suggestion--selected': sIndex === searchSelectedIndex }"
+                  @click="openSuggestion(suggestion)"
+                  @mousedown.prevent
+                >
+                  <span class="motion-overlay__search-suggestion-icon" aria-hidden="true">
+                    <template v-if="suggestion.source === 'action'">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M13 2L4.09344 12.6879C3.74463 13.1064 3.57023 13.3157 3.56756 13.4925C3.56524 13.6461 3.64072 13.7884 3.76782 13.873C3.91383 13.9717 4.18075 13.9717 4.7146 13.9717H12L11 22L19.9066 11.3121C20.2554 10.8936 20.4298 10.6843 20.4324 10.5075C20.4348 10.3539 20.3593 10.2116 20.2322 10.127C20.0862 10.0283 19.8193 10.0283 19.2854 10.0283H12L13 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </template>
+                    <img v-else-if="suggestion.favIconUrl" :src="suggestion.favIconUrl" alt="" />
+                    <span v-else>{{ getTabFallbackTitle(suggestion.title, suggestion.url).slice(0, 1).toUpperCase() }}</span>
+                  </span>
+                  <span class="motion-overlay__search-suggestion-title">{{ getTabFallbackTitle(suggestion.title, suggestion.url) }}</span>
+                  <span class="motion-overlay__search-suggestion-url">{{ suggestion.description ?? suggestion.url }}</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1151,34 +1491,32 @@ onBeforeUnmount(() => {
         </header>
 
         <div v-show="!showSettings" class="motion-overlay__main-content">
-          <div v-if="quickLinks.length || quickLinks.length < MAX_QUICK_LINKS" class="motion-overlay__quicklinks">
-            <template v-for="i in MAX_QUICK_LINKS" :key="i">
-              <div
-                v-if="quickLinks[i - 1]"
-                class="motion-overlay__quicklink"
-                :title="quickLinks[i - 1].name"
-                @click="openQuickLink(i - 1)"
-                @contextmenu.prevent="toggleQuickLinkMenu(quickLinks[i - 1].id)"
-              >
-                <img v-if="quickLinks[i - 1].favIconUrl" :src="quickLinks[i - 1].favIconUrl" :alt="quickLinks[i - 1].name" />
-                <span v-else class="motion-overlay__quicklink-letter">{{ quickLinks[i - 1].name.slice(0, 1).toUpperCase() }}</span>
-                <div v-if="activeQuickLinkMenu === quickLinks[i - 1].id" class="motion-overlay__ql-menu" @click.stop>
-                  <button type="button" class="menu-delete" @click="removeQuickLink(quickLinks[i - 1].id)">Delete</button>
-                </div>
+          <div v-if="hasQuickLinks" class="motion-overlay__quicklinks">
+            <button
+              v-if="quickLinks.length < MAX_QUICK_LINKS"
+              type="button"
+              class="motion-overlay__quicklink motion-overlay__quicklink--add"
+              @click="(e) => openAddQuickLink(e)"
+              aria-label="Add quick link"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 6V18M6 12H18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div
+              v-for="(link, index) in quickLinks"
+              :key="link.id"
+              class="motion-overlay__quicklink"
+              :title="link.name"
+              @click="openQuickLink(index)"
+              @contextmenu.prevent="toggleQuickLinkMenu(link.id)"
+            >
+              <img v-if="link.favIconUrl" :src="link.favIconUrl" :alt="link.name" />
+              <span v-else class="motion-overlay__quicklink-letter">{{ link.name.slice(0, 1).toUpperCase() }}</span>
+              <div v-if="activeQuickLinkMenu === link.id" class="motion-overlay__ql-menu" @click.stop>
+                <button type="button" class="menu-delete" @click="removeQuickLink(link.id)">Delete</button>
               </div>
-              <button
-                v-else-if="i === quickLinks.length + 1 && quickLinks.length < MAX_QUICK_LINKS"
-                type="button"
-                class="motion-overlay__quicklink motion-overlay__quicklink--add"
-                @click="(e) => openAddQuickLink(e)"
-                aria-label="Add quick link"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M12 6V18M6 12H18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
-              <div v-else class="motion-overlay__quicklink motion-overlay__quicklink--empty"></div>
-            </template>
+            </div>
           </div>
 
           <section class="motion-overlay__groups-panel" aria-label="Groups">
@@ -1241,10 +1579,10 @@ onBeforeUnmount(() => {
                   type="button"
                   class="motion-overlay__groups-content-menu-btn"
                   aria-label="Group menu"
-                  @click.stop="(e) => toggleGroupMenu(activeGroupId, e)"
+                  @click.stop="(e) => toggleGroupMenu(activeGroupId!, e)"
                 >⋮</button>
                 <div v-if="activeGroupMenu?.groupId === activeGroupId" class="motion-overlay__group-menu" :style="{ left: activeGroupMenu.x + 'px', top: activeGroupMenu.y + 'px' }" @click.stop>
-                  <button type="button" @click="(e) => startEditGroup(activeGroupId, groups.find((g) => g.id === activeGroupId)?.name ?? '', e)">Edit</button>
+                  <button type="button" @click="(e) => startEditGroup(activeGroupId!, groups.find((g) => g.id === activeGroupId)?.name ?? '', e)">Edit</button>
                   <button type="button" class="menu-delete" @click="deleteGroup(activeGroupId)">Delete</button>
                   <button type="button" @click="openAllGroupTabs(activeGroupId)">Open All Tabs</button>
                 </div>
@@ -1262,10 +1600,10 @@ onBeforeUnmount(() => {
                     :key="tab!.id"
                     class="motion-overlay__group-tab"
                     draggable="true"
-                    @dragstart="onGroupItemDragStart(activeGroupId, tab!.id, $event)"
+                    @dragstart="onGroupItemDragStart(activeGroupId!, tab!.id, $event)"
                     @dragend="onGroupItemDragEnd"
-                    @dragover.stop="onGroupItemDragOver(activeGroupId, tab!.id, $event)"
-                    @drop.stop="onGroupItemDrop(activeGroupId, tab!.id, $event)"
+                    @dragover.stop="onGroupItemDragOver(activeGroupId!, tab!.id, $event)"
+                    @drop.stop="onGroupItemDrop(activeGroupId!, tab!.id, $event)"
                   >
                     <button
                       class="motion-overlay__group-tab-main"
@@ -1283,14 +1621,14 @@ onBeforeUnmount(() => {
                       type="button"
                       class="motion-overlay__group-tab-menu-button"
                       :aria-label="`Menu for ${tab!.title}`"
-                      @click.stop="(e) => toggleItemMenu(activeGroupId, tab!.id, e)"
+                      @click.stop="(e) => toggleItemMenu(activeGroupId!, tab!.id, e)"
                     >⋮</button>
                     <div
                       v-if="activeItemMenu?.groupId === activeGroupId && activeItemMenu?.tabId === tab!.id"
                       class="motion-overlay__group-tab-menu"
                       :style="{ left: activeItemMenu.x + 'px', top: activeItemMenu.y + 'px' }"
                     >
-                      <button type="button" @click="(e) => startEditItem(activeGroupId, tab!, e)">Edit</button>
+                      <button type="button" @click="(e) => startEditItem(activeGroupId!, tab!, e)">Edit</button>
                       <button type="button" class="menu-delete" @click="deleteItem">Delete</button>
                     </div>
                   </div>
@@ -1318,36 +1656,107 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- ── Settings page ──────────────────────────────────────────────── -->
-        <div v-show="showSettings" class="motion-overlay__settings">
-          <div class="motion-overlay__settings-section">
-            <h2 class="motion-overlay__settings-title">Keyboard Shortcuts</h2>
-            <div class="motion-overlay__settings-shortcuts">
-              <div class="motion-overlay__settings-shortcut">
-                <span class="motion-overlay__settings-shortcut-label">Close overlay</span>
-                <kbd class="motion-overlay__settings-kbd">Esc</kbd>
-              </div>
-              <div class="motion-overlay__settings-shortcut">
-                <span class="motion-overlay__settings-shortcut-label">Focus search</span>
-                <kbd class="motion-overlay__settings-kbd"><span class="motion-overlay__settings-mod">⌘</span>K</kbd>
-              </div>
-              <div class="motion-overlay__settings-shortcut">
-                <span class="motion-overlay__settings-shortcut-label">Navigate tabs</span>
-                <kbd class="motion-overlay__settings-kbd">Tab</kbd>
-              </div>
-              <div class="motion-overlay__settings-shortcut">
-                <span class="motion-overlay__settings-shortcut-label">Open quick link (1–9)</span>
-                <kbd class="motion-overlay__settings-kbd">1–9</kbd>
-              </div>
+        <div v-show="showSettings" class="motion-overlay__settings" @click.self="closeAllPopups">
+          <div class="motion-overlay__settings-header">
+            <span class="motion-overlay__settings-header-title">MotionFSS</span>
+            <button type="button" class="motion-overlay__settings-close-btn" aria-label="Close settings" @click="showSettings = false">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="motion-overlay__settings-body">
+            <nav class="motion-overlay__settings-nav">
+              <button type="button" class="motion-overlay__settings-nav-item" :class="{ 'motion-overlay__settings-nav-item--active': settingsActiveSection === 'overlay' }" @click="settingsActiveSection = 'overlay'">Overlay</button>
+              <button type="button" class="motion-overlay__settings-nav-item" :class="{ 'motion-overlay__settings-nav-item--active': settingsActiveSection === 'shortcuts' }" @click="settingsActiveSection = 'shortcuts'">Shortcuts</button>
+              <button type="button" class="motion-overlay__settings-nav-item" :class="{ 'motion-overlay__settings-nav-item--active': settingsActiveSection === 'about' }" @click="settingsActiveSection = 'about'">About</button>
+            </nav>
+            <div class="motion-overlay__settings-content">
+              <template v-if="settingsActiveSection === 'overlay'">
+                <label class="motion-overlay__settings-toggle">
+                  <span class="motion-overlay__settings-toggle-label">Show footer</span>
+                  <input type="checkbox" v-model="showFooter" class="motion-overlay__settings-toggle-input" />
+                  <span class="motion-overlay__settings-toggle-track"></span>
+                </label>
+                <label class="motion-overlay__settings-toggle">
+                  <span class="motion-overlay__settings-toggle-label">Show quick links row</span>
+                  <input type="checkbox" v-model="showQuickLinks" class="motion-overlay__settings-toggle-input" />
+                  <span class="motion-overlay__settings-toggle-track"></span>
+                </label>
+                <label class="motion-overlay__settings-toggle">
+                  <span class="motion-overlay__settings-toggle-label">Show loading badge</span>
+                  <input type="checkbox" v-model="showBadge" class="motion-overlay__settings-toggle-input" />
+                  <span class="motion-overlay__settings-toggle-track"></span>
+                </label>
+                <label class="motion-overlay__settings-toggle">
+                  <span class="motion-overlay__settings-toggle-label">Fullscreen on startup</span>
+                  <input type="checkbox" v-model="toggleFullscreenOnOpen" class="motion-overlay__settings-toggle-input" />
+                  <span class="motion-overlay__settings-toggle-track"></span>
+                </label>
+                <label class="motion-overlay__settings-toggle">
+                  <span class="motion-overlay__settings-toggle-label">Open group tabs in new window</span>
+                  <input type="checkbox" v-model="openGroupTabsInNewWindow" class="motion-overlay__settings-toggle-input" />
+                  <span class="motion-overlay__settings-toggle-track"></span>
+                </label>
+                <button type="button" class="motion-overlay__settings-ext-btn" @click="openExtensionShortcuts">
+                  Set custom shortcut
+                </button>
+              </template>
+              <template v-if="settingsActiveSection === 'shortcuts'">
+                <div class="motion-overlay__settings-shortcuts">
+                  <div class="motion-overlay__settings-shortcut">
+                    <span class="motion-overlay__settings-shortcut-label">Toggle overlay</span>
+                    <kbd class="motion-overlay__settings-kbd">Alt+W</kbd>
+                  </div>
+                  <div class="motion-overlay__settings-shortcut">
+                    <span class="motion-overlay__settings-shortcut-label">Close overlay</span>
+                    <kbd class="motion-overlay__settings-kbd">Esc</kbd>
+                  </div>
+                  <div class="motion-overlay__settings-shortcut">
+                    <span class="motion-overlay__settings-shortcut-label">Focus search</span>
+                    <kbd class="motion-overlay__settings-kbd">Alt + K</kbd>
+                  </div>
+                  <div class="motion-overlay__settings-shortcut">
+                    <span class="motion-overlay__settings-shortcut-label">Navigate tabs</span>
+                    <kbd class="motion-overlay__settings-kbd">Tab</kbd>
+                  </div>
+                  <div class="motion-overlay__settings-shortcut">
+                    <span class="motion-overlay__settings-shortcut-label">Open quick link</span>
+                    <kbd class="motion-overlay__settings-kbd">Alt+1–9</kbd>
+                  </div>
+                  <div class="motion-overlay__settings-shortcut">
+                    <span class="motion-overlay__settings-shortcut-label">Toggle fullscreen</span>
+                    <kbd class="motion-overlay__settings-kbd">Alt+F</kbd>
+                  </div>
+                </div>
+              </template>
+              <template v-if="settingsActiveSection === 'about'">
+                <p class="motion-overlay__settings-about-text">Motion FSS &mdash; Fast Session Switcher</p>
+                <p class="motion-overlay__settings-version-text">Version 1.0.0</p>
+              </template>
             </div>
           </div>
-
-          <div class="motion-overlay__settings-section">
-            <h2 class="motion-overlay__settings-title">About</h2>
-            <p class="motion-overlay__settings-about">Motion FSS &mdash; Fast Session Switcher</p>
-            <p class="motion-overlay__settings-version">Version 1.0.0</p>
-          </div>
         </div>
+
       </main>
+
+      <!-- ── Footer: current URL + window controls (full width) ──────────── -->
+      <footer v-show="showFooter" class="motion-overlay__footer">
+        <span class="motion-overlay__footer-url" :title="currentUrl ? 'Click to copy URL' : ''" @click="copyUrl">{{ currentUrl || '—' }}</span>
+        <div class="motion-overlay__footer-actions">
+          <button
+            type="button"
+            class="motion-overlay__footer-action-btn"
+            aria-label="Toggle fullscreen (Alt+F)"
+            title="Toggle fullscreen (Alt+F)"
+            @click="toggleFullscreen"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M8 3H5C3.89543 3 3 3.89543 3 5V8M21 8V5C21 3.89543 20.1046 3 19 3H16M16 21H19C20.1046 21 21 20.1046 21 19V16M3 16V19C3 20.1046 3.89543 21 5 21H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </footer>
 
       <!-- ── Inline popups (no backdrops, near-mouse) ──────────────────────── -->
       <div v-if="isNewGroupOpen" class="motion-overlay__popup" :style="{ left: newGroupPopup?.x + 'px', top: newGroupPopup?.y + 'px' }" @click.stop>
@@ -1388,9 +1797,9 @@ onBeforeUnmount(() => {
 
       <div v-if="isNewQuickLinkOpen" class="motion-overlay__popup" :style="{ left: newQuickLinkPopup?.x + 'px', top: newQuickLinkPopup?.y + 'px' }" @click.stop>
         <p class="motion-overlay__popup-label">Add Quick Link</p>
-        <p class="motion-overlay__popup-desc">Paste a URL to add a quick link. The site name is derived automatically.</p>
+        <p class="motion-overlay__popup-desc">Paste a URL — the name is derived automatically.</p>
         <form @submit.prevent="addQuickLink">
-          <input ref="newQuickLinkInput" v-model="newQuickLinkUrl" type="text" placeholder="URL" maxlength="500" autofocus @keydown.esc.prevent="closeAllPopups" />
+          <input ref="newQuickLinkInput" v-model="newQuickLinkUrl" type="text" placeholder="https://example.com" maxlength="500" autofocus @keydown.esc.prevent="closeAllPopups" />
           <div class="motion-overlay__popup-actions">
             <button type="button" class="motion-overlay__popup-button motion-overlay__popup-button--ghost" @click="closeAllPopups">Cancel</button>
             <button type="submit" class="motion-overlay__popup-button">Add</button>
